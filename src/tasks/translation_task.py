@@ -1,11 +1,11 @@
 """
 文本翻译任务模块
 """
-import logging
-from typing import Optional, Dict, Any
 import asyncio
+import logging
 import psutil
 from datetime import datetime
+from typing import Optional, Dict, Any
 
 from src.tasks.celery_app import celery_app
 from src.types.models import TaskStatus, SourceType
@@ -13,8 +13,45 @@ from src.config.settings import settings
 from src.database.connection import db_manager
 from src.database.models import Task, TranslationResult
 from src.services.translation_engine_service import translation_engine_service
+from src.utils.logger import get_business_logger, setup_business_logging
 
-logger = logging.getLogger(__name__)
+# 设置业务日志
+setup_business_logging()
+logger = get_business_logger(__name__)
+
+
+def update_task_status(task_id: str, status: TaskStatus, details: Optional[Dict[str, Any]] = None):
+    """更新任务状态"""
+    try:
+        with db_manager.get_session() as db:
+            task = db.query(Task).filter(Task.task_id == task_id).first()
+            if task:
+                task.status = status.value
+                task.updated_at = datetime.utcnow()
+                
+                # 根据状态更新相应的时间字段
+                if status == TaskStatus.TRANSCRIPTION_COMPLETED:
+                    task.transcription_completed_at = datetime.utcnow()
+                elif status == TaskStatus.TRANSLATION_COMPLETED:
+                    task.translation_completed_at = datetime.utcnow()
+                elif status == TaskStatus.PACKAGING_COMPLETED:
+                    task.completed_at = datetime.utcnow()
+                
+                if details:
+                    if "error" in details:
+                        task.error_message = details["error"]
+                    if "accuracy" in details:
+                        task.accuracy = details["accuracy"]
+                    if "result_url" in details:
+                        task.result_url = details["result_url"]
+                
+                db.commit()
+                logger.step("SYSTEM", "状态更新成功", task_id, status=status.value)
+            else:
+                logger.step("ERROR", "任务不存在", task_id)
+                
+    except Exception as e:
+        logger.step("ERROR", "状态更新失败", task_id, error=str(e))
 
 
 def check_memory_usage() -> bool:
@@ -49,7 +86,8 @@ def save_translation_result(
                 # 更新现有记录
                 existing.translated_text = translation_data["translated_text"]
                 existing.confidence = translation_data.get("confidence")
-                logger.info(f"更新翻译结果: {task_id} -> {target_language} ({source.value})")
+                logger.step("TRANSLATION", "更新翻译结果", task_id, 
+                           language=target_language, source=source.value)
             else:
                 # 创建新记录
                 translation_result = TranslationResult(
@@ -61,20 +99,24 @@ def save_translation_result(
                     confidence=translation_data.get("confidence")
                 )
                 db.add(translation_result)
-                logger.info(f"保存翻译结果: {task_id} -> {target_language} ({source.value})")
+                logger.step("TRANSLATION", "保存翻译结果", task_id, 
+                           language=target_language, source=source.value)
             
             db.commit()
             
     except Exception as e:
-        logger.error(f"保存翻译结果失败: {e}")
+        logger.step("ERROR", "保存翻译结果失败", task_id, error=str(e))
 
 
 def check_all_translations_completed(task_id: str) -> bool:
     """检查任务的所有翻译是否都已完成"""
     try:
+        logger.step("TRANSLATION", "开始检查翻译完成状态", task_id)
+        
         with db_manager.get_session() as db:
             task = db.query(Task).filter(Task.task_id == task_id).first()
             if not task:
+                logger.step("TRANSLATION", "任务不存在", task_id)
                 return False
             
             # 获取所有翻译结果
@@ -83,7 +125,6 @@ def check_all_translations_completed(task_id: str) -> bool:
             ).all()
             
             # 计算期待的翻译数量
-            # 现在使用配置中的所有支持语言作为目标语言
             target_languages = task.languages
             expected_count = len(target_languages)
             
@@ -92,19 +133,35 @@ def check_all_translations_completed(task_id: str) -> bool:
                 expected_count *= 2
             
             actual_count = len(translations)
+            completed_languages = list(set(t.target_language for t in translations))
             
-            logger.info(f"翻译进度检查: {task_id} - {actual_count}/{expected_count} (目标语言: {target_languages})")
+            logger.step("TRANSLATION", "翻译进度统计", task_id,
+                       progress=f"{actual_count}/{expected_count}",
+                       target_languages=target_languages,
+                       completed_languages=completed_languages,
+                       has_reference=bool(task.reference_text and task.reference_text.strip()))
             
             if actual_count >= expected_count:
+                logger.step("TRANSLATION", "所有翻译已完成", task_id,
+                           total_translations=actual_count)
+                
+                # 更新任务状态为翻译完成
+                logger.step("TRANSLATION", "更新状态为翻译完成", task_id)
+                update_task_status(task_id, TaskStatus.TRANSLATION_COMPLETED)
+                
                 # 触发打包任务
+                logger.step("TRANSLATION", "触发打包任务", task_id)
                 from src.tasks.packaging_task import package_results_task
                 package_results_task.delay(task_id)
                 return True
+            else:
+                logger.step("TRANSLATION", "翻译尚未完成", task_id,
+                           remaining=expected_count - actual_count)
             
             return False
             
     except Exception as e:
-        logger.error(f"检查翻译完成状态失败: {e}")
+        logger.step("ERROR", "检查翻译完成状态失败", task_id, error=str(e))
         return False
 
 
@@ -234,32 +291,50 @@ def translate_text_task(
     使用翻译引擎服务进行多语言翻译（支持本地模型和千问大模型）
     """
     try:
-        logger.info(f"开始翻译任务: {task_id} -> {target_language} ({source})")
+        # === 任务开始记录 ===
+        logger.step("TRANSLATION", "翻译任务开始", task_id,
+                   target_language=target_language,
+                   source_type=source,
+                   text_preview=text[:50] + ("..." if len(text) > 50 else ""))
         
-        # 内存检查
+        # 更新任务状态为翻译处理中（只在第一个翻译任务时更新）
+        with db_manager.get_session() as db:
+            task = db.query(Task).filter(Task.task_id == task_id).first()
+            if task and task.status == TaskStatus.TRANSLATION_PENDING.value:
+                logger.step("TRANSLATION", "更新状态为处理中", task_id)
+                update_task_status(task_id, TaskStatus.TRANSLATION_PROCESSING)
+        
+        # === 系统资源检查 ===
+        memory_percent = psutil.virtual_memory().percent
+        logger.resource_usage(task_id,
+                            memory_percent=f"{memory_percent:.1f}%")
+        
         if not check_memory_usage():
-            raise Exception(f"内存使用率过高: {psutil.virtual_memory().percent:.1f}%，暂停处理")
+            raise Exception(f"内存使用率过高: {memory_percent:.1f}%，暂停处理")
         
         # 转换来源类型
         source_type = SourceType(source)
         
-        # 检测源语言
+        # === 语言检测 ===
+        logger.step("TRANSLATION", "开始检测源语言", task_id)
         detected_source_language = detect_text_language(text)
-        logger.info(f"检测到源语言: {detected_source_language}, 目标语言: {target_language}")
-        logger.info(f"文本内容: {text[:100]}...")
+        logger.step("TRANSLATION", "语言检测完成", task_id,
+                   detected_source=detected_source_language,
+                   target=target_language)
         
-        # 如果源语言和目标语言相同，跳过翻译
+        # === 检查是否需要翻译 ===
         if detected_source_language == target_language:
-            logger.info(f"源语言({detected_source_language})与目标语言({target_language})相同，跳过翻译")
+            logger.translation_skip(task_id, target_language, 
+                                  "源语言与目标语言相同")
             
             # 保存原文作为翻译结果
             result_data = {
                 "task_id": task_id,
                 "source_text": text,
-                "translated_text": text,  # 原文作为翻译结果
+                "translated_text": text,
                 "target_language": target_language,
                 "source_type": source_type.value,
-                "confidence": 1.0,  # 原文置信度为1.0
+                "confidence": 1.0,
                 "engine": "skip_same_language",
                 "timestamp": datetime.utcnow().isoformat()
             }
@@ -275,36 +350,46 @@ def translate_text_task(
                 "note": "源语言与目标语言相同，跳过翻译"
             }
         
-        # 使用翻译引擎服务进行翻译
+        # === 开始翻译 ===
+        logger.translation_start(task_id, detected_source_language, target_language,
+                                source_type=source,
+                                text_length=len(text))
+        
         async def run_translation():
             return await translation_engine_service.translate(
                 text=text,
                 target_language=target_language,
-                source_language=detected_source_language  # 使用检测到的源语言
+                source_language=detected_source_language
             )
         
         # 在 Celery 任务中运行异步函数
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
+        translation_start_time = datetime.utcnow()
         try:
             translation_result = loop.run_until_complete(run_translation())
         finally:
             loop.close()
+        translation_duration = (datetime.utcnow() - translation_start_time).total_seconds()
         
-        # 提取翻译结果
+        # === 处理翻译结果 ===
         translated_text = translation_result["translated_text"]
         confidence = translation_result.get("confidence", 0.8)
         engine_used = translation_result.get("engine", "unknown")
         
-        # 记录使用的引擎
-        logger.info(f"翻译完成 - 引擎: {engine_used}, 置信度: {confidence:.3f}")
+        logger.translation_complete(task_id, detected_source_language, target_language,
+                                  engine_used, confidence,
+                                  duration=f"{translation_duration:.2f}s",
+                                  result_preview=translated_text[:50] + ("..." if len(translated_text) > 50 else ""))
+        logger.performance(task_id, "translation", translation_duration)
         
         # 如果是混合模式的回退，记录详细信息
         if translation_result.get("fallback"):
-            logger.info(f"使用回退引擎: {translation_result.get('local_error', 'Unknown error')}")
+            logger.step("TRANSLATION", "使用回退引擎", task_id,
+                       fallback_reason=translation_result.get('local_error', 'Unknown error'))
         
-        # 保存翻译结果
+        # === 保存翻译结果 ===
         result_data = {
             "task_id": task_id,
             "source_text": text,
@@ -316,12 +401,20 @@ def translate_text_task(
             "timestamp": datetime.utcnow().isoformat()
         }
         
+        logger.step("TRANSLATION", "保存翻译结果", task_id,
+                   target_language=target_language,
+                   confidence=f"{confidence:.3f}")
         save_translation_result(task_id, target_language, source_type, result_data)
         
-        # 检查是否所有翻译都完成
+        # === 检查所有翻译是否完成 ===
+        logger.step("TRANSLATION", "检查所有翻译完成状态", task_id)
         check_all_translations_completed(task_id)
         
-        logger.info(f"翻译任务完成: {task_id} -> {target_language} ({source})")
+        logger.step("TRANSLATION", "单个翻译任务完成", task_id,
+                   target_language=target_language,
+                   engine=engine_used,
+                   duration=f"{translation_duration:.2f}s")
+        
         return {
             "status": "success", 
             "translated_text": translated_text,
@@ -331,12 +424,16 @@ def translate_text_task(
         
     except Exception as e:
         error_msg = f"翻译失败: {str(e)}"
-        logger.error(f"任务 {task_id} - {error_msg}")
+        logger.translation_fail(task_id, detected_source_language if 'detected_source_language' in locals() else 'unknown', 
+                               target_language, error_msg)
         
         # 重试逻辑
         retry_count = settings.translation_retry_count
         if self.request.retries < retry_count:
-            logger.info(f"重试翻译任务 {task_id} (第 {self.request.retries + 1} 次)")
+            logger.step("TRANSLATION", "准备重试", task_id,
+                       retry_count=self.request.retries + 1,
+                       max_retries=retry_count,
+                       countdown=f"{min(60 * (2 ** self.request.retries), 300)}s")
             # 使用指数退避策略
             countdown = min(60 * (2 ** self.request.retries), 300)  # 最大5分钟
             raise self.retry(countdown=countdown, exc=e)
@@ -353,7 +450,7 @@ def get_all_translations_by_task(task_id: str):
             ).all()
             return translations
     except Exception as e:
-        logger.error(f"查询翻译结果失败: {e}")
+        logger.step("ERROR", "查询翻译结果失败", task_id, error=str(e))
         return []
 
 
@@ -362,5 +459,5 @@ def get_translation_engine_status() -> Dict[str, Any]:
     try:
         return translation_engine_service.get_engine_status()
     except Exception as e:
-        logger.error(f"获取翻译引擎状态失败: {e}")
+        logger.step("ERROR", "获取翻译引擎状态失败", error=str(e))
         return {"error": str(e)} 

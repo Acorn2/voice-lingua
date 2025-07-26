@@ -35,10 +35,12 @@ def setup_worker_logging():
         force=True  # 强制重新配置
     )
     
-    # 减少 SQLAlchemy 日志的详细程度
-    logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
-    logging.getLogger('sqlalchemy.pool').setLevel(logging.WARNING)
-    logging.getLogger('sqlalchemy.dialects').setLevel(logging.WARNING)
+    # 彻底减少 SQLAlchemy 日志的详细程度
+    logging.getLogger('sqlalchemy.engine').setLevel(logging.ERROR)
+    logging.getLogger('sqlalchemy.pool').setLevel(logging.ERROR)
+    logging.getLogger('sqlalchemy.dialects').setLevel(logging.ERROR)
+    logging.getLogger('sqlalchemy.orm').setLevel(logging.ERROR)
+    logging.getLogger('sqlalchemy').setLevel(logging.ERROR)
 
 # 创建 Celery 应用实例
 celery_app = Celery("voicelingua")

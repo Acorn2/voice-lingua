@@ -28,7 +28,9 @@ class Task(Base):
     result_url = Column(Text, nullable=True)  # 腾讯云COS结果文件路径
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    completed_at = Column(DateTime, nullable=True)
+    transcription_completed_at = Column(DateTime, nullable=True)  # 转录完成时间
+    translation_completed_at = Column(DateTime, nullable=True)   # 翻译完成时间
+    completed_at = Column(DateTime, nullable=True)               # 整个任务完成时间（packaging_completed）
     
     # 关联关系
     translation_results = relationship("TranslationResult", back_populates="task", cascade="all, delete-orphan")
@@ -52,6 +54,8 @@ class Task(Base):
             "result_url": self.result_url,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "transcription_completed_at": self.transcription_completed_at.isoformat() if self.transcription_completed_at else None,
+            "translation_completed_at": self.translation_completed_at.isoformat() if self.translation_completed_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
         }
 

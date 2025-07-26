@@ -34,10 +34,12 @@ logging.basicConfig(
     ]
 )
 
-# 减少 SQLAlchemy 日志的详细程度
-logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
-logging.getLogger('sqlalchemy.pool').setLevel(logging.WARNING)
-logging.getLogger('sqlalchemy.dialects').setLevel(logging.WARNING)
+# 彻底减少 SQLAlchemy 日志的详细程度
+logging.getLogger('sqlalchemy.engine').setLevel(logging.ERROR)
+logging.getLogger('sqlalchemy.pool').setLevel(logging.ERROR)
+logging.getLogger('sqlalchemy.dialects').setLevel(logging.ERROR)
+logging.getLogger('sqlalchemy.orm').setLevel(logging.ERROR)
+logging.getLogger('sqlalchemy').setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
 

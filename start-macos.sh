@@ -165,27 +165,6 @@ check_config() {
     fi
 }
 
-# 测试云服务连接
-test_cloud_services() {
-    log_info "测试云服务器连接..."
-    
-    # 测试 API 是否能正常启动（间接测试数据库和Redis连接）
-    log_info "测试数据库和 Redis 连接..."
-    
-    # 使用独立的测试脚本进行连接测试
-    log_info "运行详细连接测试..."
-    if $PYTHON_CMD test_connection.py; then
-        log_success "云服务器连接测试通过"
-    else
-        log_error "云服务器连接测试失败，请检查上面的详细错误信息"
-        log_error "常见问题："
-        echo "  1. 检查网络连接是否正常"
-        echo "  2. 确认云服务器地址和端口正确"
-        echo "  3. 验证用户名和密码正确"
-        echo "  4. 检查防火墙设置"
-        exit 1
-    fi
-}
 
 # 启动 API 服务
 start_api() {
@@ -306,8 +285,6 @@ main() {
     clean_old_logs  # 清理旧日志文件
     install_dependencies
     
-    # 测试云服务连接
-    test_cloud_services
     
     # 启动本地服务
     start_api
