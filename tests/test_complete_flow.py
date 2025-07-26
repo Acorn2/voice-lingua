@@ -6,7 +6,8 @@ import sys
 import os
 import time
 import json
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# 添加项目根目录到 Python 路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.database.connection import db_manager
 from src.database.models import Task, TranslationResult
@@ -137,8 +138,8 @@ def check_result_file(task_id: str):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("用法: python test_complete_flow.py <task_id>")
-        print("示例: python test_complete_flow.py 27f5afee-6df8-4cb2-adea-af0a3137da90")
+        print("用法: python tests/test_complete_flow.py <task_id>")
+        print("示例: python tests/test_complete_flow.py 27f5afee-6df8-4cb2-adea-af0a3137da90")
         sys.exit(1)
     
     task_id = sys.argv[1]

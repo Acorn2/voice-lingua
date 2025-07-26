@@ -5,6 +5,7 @@
 import requests
 import json
 import time
+import os
 
 # API 基础地址
 BASE_URL = "http://localhost:8000"
@@ -127,8 +128,6 @@ def test_health_check():
 
 
 if __name__ == "__main__":
-    import os
-    
     print("=" * 60)
     print("VoiceLingua 简化 API 测试")
     print("=" * 60)

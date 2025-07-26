@@ -5,7 +5,8 @@
 """
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# 添加项目根目录到 Python 路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.database.connection import db_manager
 from src.database.models import Task
@@ -84,7 +85,7 @@ def fix_stuck_task(task_id: str):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("用法: python fix_stuck_task.py <task_id>")
+        print("用法: python tests/fix_stuck_task.py <task_id>")
         sys.exit(1)
     
     task_id = sys.argv[1]
