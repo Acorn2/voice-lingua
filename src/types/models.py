@@ -160,7 +160,7 @@ class HealthCheck(BaseModel):
     status: str = "healthy"
     timestamp: str
     version: str
-    components: Dict[str, str] = Field(default_factory=dict)
+    components: Dict[str, Any] = Field(default_factory=dict)
 
 
 # 错误响应模型

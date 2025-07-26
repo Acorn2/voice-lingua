@@ -22,7 +22,7 @@ from src.types.models import (
 from src.database.connection import get_db, create_tables, db_manager
 from src.database.models import Task, TranslationResult as DBTranslationResult
 from src.tasks.transcription_task import transcribe_audio_task
-from src.tasks.translation_task import translate_text_task
+from src.tasks.translation_task import translate_text_task, get_translation_engine_status
 
 # 配置日志
 logging.basicConfig(
@@ -387,6 +387,23 @@ async def get_translation(
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
 
 
+@app.get("/api/v1/translation/engine/status")
+async def get_translation_engine_status_api():
+    """
+    获取翻译引擎状态
+    """
+    try:
+        status = get_translation_engine_status()
+        return {
+            "status": "success",
+            "data": status,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"获取翻译引擎状态失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取状态失败: {str(e)}")
+
+
 @app.get("/api/v1/health", response_model=HealthCheck)
 async def health_check():
     """
@@ -405,6 +422,13 @@ async def health_check():
     
     # 检查存储服务（简化检查）
     components["storage"] = "healthy"  # 实际应该测试 COS 连接
+
+    # 检查翻译引擎状态
+    try:
+        engine_status = get_translation_engine_status()
+        components["translation_engine"] = engine_status
+    except Exception as e:
+        components["translation_engine"] = {"status": "unhealthy", "error": str(e)}
     
     return HealthCheck(
         status="healthy",

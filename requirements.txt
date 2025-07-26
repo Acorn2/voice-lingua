@@ -5,7 +5,7 @@ python-multipart==0.0.6
 
 # 异步任务
 celery[redis]==5.3.4
-redis==5.0.1
+redis>=4.5.2,<5.0.0
 
 # 数据库
 sqlalchemy==2.0.23
@@ -18,6 +18,7 @@ torch==2.1.1
 torchvision==0.16.1
 torchaudio==2.1.1
 transformers==4.35.2
+numpy<2.0.0
 
 # 文本处理
 textdistance==4.6.1
@@ -28,12 +29,16 @@ pydub==0.25.1
 cos-python-sdk-v5==1.9.24
 httpx==0.25.2
 
+# 千问大模型API
+dashscope==1.14.1
+
 # 系统监控
 psutil==5.9.6
 prometheus-client==0.19.0
 
 # 工具库
 pydantic==2.5.0
+pydantic-settings==2.1.0
 python-dotenv==1.0.0
 aiofiles==23.2.1
 

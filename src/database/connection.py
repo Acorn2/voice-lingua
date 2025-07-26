@@ -2,7 +2,7 @@
 数据库连接管理
 """
 from typing import Generator
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 import logging
@@ -73,7 +73,7 @@ class DatabaseManager:
         """测试数据库连接"""
         try:
             with self.engine.connect() as conn:
-                conn.execute("SELECT 1")
+                conn.execute(text("SELECT 1"))
             logger.info("数据库连接测试成功")
             return True
         except SQLAlchemyError as e:

@@ -3,7 +3,16 @@ VoiceLingua 项目配置文件
 """
 import os
 from typing import List, Optional
-from pydantic import BaseSettings, Field
+from pydantic import Field
+from pydantic_settings import BaseSettings
+from enum import Enum
+
+
+class TranslationEngine(str, Enum):
+    """翻译引擎类型"""
+    LOCAL = "local"     # 仅使用本地模型
+    QWEN = "qwen"       # 仅使用千问大模型
+    MIXED = "mixed"     # 混合模式，优先本地模型
 
 
 class Settings(BaseSettings):
@@ -20,6 +29,7 @@ class Settings(BaseSettings):
     
     # Redis 配置
     redis_url: str = Field(default="redis://localhost:6379/0", env="REDIS_URL")
+    redis_password: Optional[str] = Field(default=None, env="REDIS_PASSWORD")
     celery_broker_url: str = Field(default="redis://localhost:6379/0", env="CELERY_BROKER_URL")
     celery_result_backend: str = Field(default="redis://localhost:6379/1", env="CELERY_RESULT_BACKEND")
     
@@ -36,7 +46,15 @@ class Settings(BaseSettings):
     
     # 翻译配置
     translation_model: str = Field(default="facebook/m2m100_418M", env="TRANSLATION_MODEL")
+    translation_engine: TranslationEngine = Field(default=TranslationEngine.MIXED, env="TRANSLATION_ENGINE")
     max_translation_length: int = Field(default=512, env="MAX_TRANSLATION_LENGTH")
+    translation_timeout: int = Field(default=30, env="TRANSLATION_TIMEOUT")
+    translation_retry_count: int = Field(default=3, env="TRANSLATION_RETRY_COUNT")
+    
+    # 千问大模型配置
+    qwen_model: str = Field(default="qwen-plus", env="QWEN_MODEL")
+    qwen_api_key: Optional[str] = Field(default=None, env="QWEN_API_KEY")
+    qwen_api_base: str = Field(default="https://dashscope.aliyuncs.com/compatible-mode/v1", env="QWEN_API_BASE")
     
     # 系统限制
     max_upload_size: int = Field(default=100 * 1024 * 1024, env="MAX_UPLOAD_SIZE")  # 100MB
@@ -50,18 +68,18 @@ class Settings(BaseSettings):
     log_file: str = Field(default="logs/voicelingua.log", env="LOG_FILE")
     
     # 安全配置
-    allowed_hosts: List[str] = Field(default=["localhost", "127.0.0.1"], env="ALLOWED_HOSTS")
-    cors_origins: List[str] = Field(default=["http://localhost:3000"], env="CORS_ORIGINS")
+    allowed_hosts: str = Field(default="localhost,127.0.0.1", env="ALLOWED_HOSTS")
+    cors_origins: str = Field(default="http://localhost:3000", env="CORS_ORIGINS")
     
     # 支持的语言
-    supported_languages: List[str] = Field(
-        default=["en", "zh", "zh-tw", "ja", "ko", "fr", "de", "es", "it", "ru"],
+    supported_languages: str = Field(
+        default="en,zh,zh-tw,ja,ko,fr,de,es,it,ru",
         env="SUPPORTED_LANGUAGES"
     )
     
     # 支持的音频格式
-    supported_audio_formats: List[str] = Field(
-        default=[".mp3", ".wav", ".m4a", ".flac"],
+    supported_audio_formats: str = Field(
+        default=".mp3,.wav,.m4a,.flac",
         env="SUPPORTED_AUDIO_FORMATS"
     )
     
@@ -69,6 +87,64 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
+    
+    def get_redis_url(self) -> str:
+        """获取带密码的Redis URL"""
+        # 如果 URL 中已经包含认证信息，直接返回
+        if "@" in self.redis_url:
+            return self.redis_url
+        
+        # 如果有单独的密码配置，则添加到URL中
+        if self.redis_password and self.redis_password.strip():
+            if "://" in self.redis_url:
+                protocol, rest = self.redis_url.split("://", 1)
+                return f"{protocol}://:{self.redis_password}@{rest}"
+        
+        return self.redis_url
+    
+    def get_celery_broker_url(self) -> str:
+        """获取带密码的Celery Broker URL"""
+        # 如果 URL 中已经包含认证信息，直接返回
+        if "@" in self.celery_broker_url:
+            return self.celery_broker_url
+        
+        # 如果有单独的密码配置，则添加到URL中
+        if self.redis_password and self.redis_password.strip():
+            if "://" in self.celery_broker_url:
+                protocol, rest = self.celery_broker_url.split("://", 1)
+                return f"{protocol}://:{self.redis_password}@{rest}"
+        
+        return self.celery_broker_url
+    
+    def get_celery_result_backend(self) -> str:
+        """获取带密码的Celery Result Backend URL"""
+        # 如果 URL 中已经包含认证信息，直接返回
+        if "@" in self.celery_result_backend:
+            return self.celery_result_backend
+        
+        # 如果有单独的密码配置，则添加到URL中
+        if self.redis_password and self.redis_password.strip():
+            if "://" in self.celery_result_backend:
+                protocol, rest = self.celery_result_backend.split("://", 1)
+                return f"{protocol}://:{self.redis_password}@{rest}"
+        
+        return self.celery_result_backend
+    
+    def get_allowed_hosts(self) -> List[str]:
+        """获取允许的主机列表"""
+        return [host.strip() for host in self.allowed_hosts.split(",") if host.strip()]
+    
+    def get_cors_origins(self) -> List[str]:
+        """获取CORS源列表"""
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+    
+    def get_supported_languages(self) -> List[str]:
+        """获取支持的语言列表"""
+        return [lang.strip() for lang in self.supported_languages.split(",") if lang.strip()]
+    
+    def get_supported_audio_formats(self) -> List[str]:
+        """获取支持的音频格式列表"""
+        return [fmt.strip() for fmt in self.supported_audio_formats.split(",") if fmt.strip()]
 
 
 # 全局配置实例
@@ -91,8 +167,8 @@ LANGUAGE_MAPPING = {
 
 # Celery 配置
 CELERY_CONFIG = {
-    "broker_url": settings.celery_broker_url,
-    "result_backend": settings.celery_result_backend,
+    "broker_url": settings.get_celery_broker_url(),
+    "result_backend": settings.get_celery_result_backend(),
     "task_serializer": "json",
     "accept_content": ["json"],
     "result_serializer": "json",

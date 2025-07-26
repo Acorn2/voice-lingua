@@ -2,8 +2,22 @@
 
 # VoiceLingua 本地启动脚本
 # 用于在本地环境启动所有必要的服务
+# PostgreSQL 和 Redis 使用云服务器，无需本地启动
 
 set -e  # 遇到错误立即退出
+
+# 检测并设置正确的 Python 执行器
+PYTHON_CMD="python3"
+
+# 如果在 zsh 中有 python3 alias，尝试获取真实路径
+if [[ "$SHELL" == *"zsh"* ]] && type -a python3 2>/dev/null | grep -q "aliased"; then
+    # 从 alias 获取真实路径
+    PYTHON_CMD="/usr/local/opt/python@3.11/bin/python3.11"
+elif command -v python3.11 &> /dev/null; then
+    PYTHON_CMD="python3.11"
+elif [[ -f "/usr/local/opt/python@3.11/bin/python3.11" ]]; then
+    PYTHON_CMD="/usr/local/opt/python@3.11/bin/python3.11"
+fi
 
 # 颜色定义
 RED='\033[0;31m'
@@ -46,54 +60,13 @@ check_port() {
     return 0
 }
 
-# 启动数据库和 Redis（使用 Docker）
-start_infrastructure() {
-    log_info "启动基础设施服务 (PostgreSQL & Redis)..."
-    
-    # 检查 Docker 是否运行
-    if ! docker info >/dev/null 2>&1; then
-        log_error "Docker 未运行，请先启动 Docker"
-        exit 1
-    fi
-    
-    # 启动数据库和 Redis
-    if docker-compose up -d db redis; then
-        log_success "数据库和 Redis 启动成功"
-        
-        # 等待服务启动
-        log_info "等待数据库启动..."
-        sleep 5
-        
-        # 检查数据库连接
-        max_attempts=30
-        attempt=0
-        while [ $attempt -lt $max_attempts ]; do
-            if docker-compose exec -T db pg_isready -U postgres >/dev/null 2>&1; then
-                log_success "数据库连接就绪"
-                break
-            fi
-            attempt=$((attempt + 1))
-            echo -n "."
-            sleep 1
-        done
-        
-        if [ $attempt -eq $max_attempts ]; then
-            log_error "数据库启动超时"
-            exit 1
-        fi
-    else
-        log_error "启动基础设施服务失败"
-        exit 1
-    fi
-}
-
 # 检查 Python 环境
 check_python_env() {
     log_info "检查 Python 环境..."
     
     # 检查 Python 版本
-    python_version=$(python3 --version 2>&1 | cut -d' ' -f2)
-    log_info "Python 版本: $python_version"
+    python_version=$($PYTHON_CMD --version 2>&1 | cut -d' ' -f2)
+    log_info "Python 版本: $python_version (使用: $PYTHON_CMD)"
     
     # 检查虚拟环境
     if [[ "$VIRTUAL_ENV" == "" ]]; then
@@ -119,9 +92,9 @@ install_dependencies() {
     fi
     
     # 检查是否需要安装依赖
-    if ! python3 -c "import fastapi, celery, whisper, transformers" >/dev/null 2>&1; then
+    if ! $PYTHON_CMD -c "import fastapi, celery, transformers, pydantic" >/dev/null 2>&1; then
         log_info "安装 Python 依赖包..."
-        pip install -r requirements.txt
+        $PYTHON_CMD -m pip install -r requirements.txt
         log_success "依赖包安装完成"
     else
         log_success "Python 依赖包已安装"
@@ -152,10 +125,13 @@ check_config() {
             log_warning ".env 文件不存在，从 env.example 复制..."
             cp env.example .env
             log_warning "请编辑 .env 文件，填入正确的配置信息"
-            log_warning "特别是腾讯云COS相关配置："
+            log_warning "重要配置项："
+            echo "  - DATABASE_URL (PostgreSQL 云服务器地址)"
+            echo "  - REDIS_URL (Redis 云服务器地址)"
             echo "  - TENCENT_SECRET_ID"
             echo "  - TENCENT_SECRET_KEY"
             echo "  - COS_BUCKET_NAME"
+            echo "  - QWEN_API_KEY (如果使用千问大模型)"
             read -p "配置完成后按回车继续..."
         else
             log_error "配置文件不存在，请创建 .env 文件"
@@ -166,24 +142,57 @@ check_config() {
     fi
 }
 
+# 测试云服务连接
+test_cloud_services() {
+    log_info "测试云服务器连接..."
+    
+    # 测试 API 是否能正常启动（间接测试数据库和Redis连接）
+    log_info "测试数据库和 Redis 连接..."
+    
+    # 使用独立的测试脚本进行连接测试
+    log_info "运行详细连接测试..."
+    if $PYTHON_CMD test_connection.py; then
+        log_success "云服务器连接测试通过"
+    else
+        log_error "云服务器连接测试失败，请检查上面的详细错误信息"
+        log_error "常见问题："
+        echo "  1. 检查网络连接是否正常"
+        echo "  2. 确认云服务器地址和端口正确"
+        echo "  3. 验证用户名和密码正确"
+        echo "  4. 检查防火墙设置"
+        exit 1
+    fi
+}
+
 # 启动 API 服务
 start_api() {
     log_info "启动 FastAPI 服务..."
     
     if check_port 8000; then
         # 后台启动 API 服务
-        nohup python3 -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload > logs/api.log 2>&1 &
+        nohup $PYTHON_CMD -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload > logs/api.log 2>&1 &
         API_PID=$!
         echo $API_PID > .api.pid
         
         # 等待服务启动
-        sleep 3
+        log_info "等待 API 服务启动..."
+        sleep 5
         
         # 检查服务是否正常启动
-        if curl -f http://localhost:8000/api/v1/health >/dev/null 2>&1; then
-            log_success "API 服务启动成功 (PID: $API_PID)"
-            log_info "API 文档地址: http://localhost:8000/docs"
-        else
+        max_attempts=10
+        attempt=0
+        while [ $attempt -lt $max_attempts ]; do
+            if curl -f http://localhost:8000/api/v1/health >/dev/null 2>&1; then
+                log_success "API 服务启动成功 (PID: $API_PID)"
+                log_info "API 文档地址: http://localhost:8000/docs"
+                break
+            fi
+            attempt=$((attempt + 1))
+            echo -n "."
+            sleep 1
+        done
+        
+        if [ $attempt -eq $max_attempts ]; then
             log_error "API 服务启动失败，请检查日志: logs/api.log"
             return 1
         fi
@@ -215,7 +224,7 @@ start_workers() {
     PACKAGING_PID=$!
     echo $PACKAGING_PID > .worker-packaging.pid
     
-    sleep 2
+    sleep 3
     log_success "Celery Workers 启动完成"
     log_info "转录 Worker PID: $TRANSCRIPTION_PID"
     log_info "翻译 Worker PID: $TRANSLATION_PID"
@@ -228,17 +237,21 @@ show_status() {
     log_success "=== VoiceLingua 服务启动完成 ==="
     echo
     log_info "服务地址:"
-    echo "  🌐 API 服务:     http://localhost:8000"
-    echo "  📚 API 文档:     http://localhost:8000/docs"
-    echo "  ❤️  健康检查:    http://localhost:8000/api/v1/health"
+    echo "  🌐 API 服务:        http://localhost:8000"
+    echo "  📚 API 文档:        http://localhost:8000/docs"
+    echo "  ❤️  健康检查:       http://localhost:8000/api/v1/health"
+    echo "  🔧 翻译引擎状态:    http://localhost:8000/api/v1/translation/engine/status"
     echo
     log_info "日志文件:"
-    echo "  📋 API 日志:     logs/api.log"
-    echo "  🎵 转录日志:     logs/worker-transcription.log"
-    echo "  🌍 翻译日志:     logs/worker-translation.log"
-    echo "  📦 打包日志:     logs/worker-packaging.log"
+    echo "  📋 API 日志:        logs/api.log"
+    echo "  🎵 转录日志:        logs/worker-transcription.log"
+    echo "  🌍 翻译日志:        logs/worker-translation.log"
+    echo "  📦 打包日志:        logs/worker-packaging.log"
     echo
-    log_info "停止服务: ./stop.sh"
+    log_info "管理命令:"
+    echo "  停止服务:          ./stop.sh"
+    echo "  检查状态:          ./stop.sh status"
+    echo "  查看日志:          ./start.sh logs"
     echo
 }
 
@@ -246,12 +259,11 @@ show_status() {
 main() {
     echo
     log_info "正在启动 VoiceLingua 语音转录与翻译系统..."
+    log_info "使用云服务器上的 PostgreSQL 和 Redis"
     echo
     
     # 基础检查
     check_command "python3"
-    check_command "docker"
-    check_command "docker-compose"
     check_command "curl"
     
     # 检查和准备环境
@@ -260,8 +272,10 @@ main() {
     create_directories
     install_dependencies
     
-    # 启动服务
-    start_infrastructure
+    # 测试云服务连接
+    test_cloud_services
+    
+    # 启动本地服务
     start_api
     start_workers
     
@@ -317,6 +331,11 @@ case "${1:-}" in
     "logs")
         log_info "显示实时日志..."
         tail -f logs/*.log
+        ;;
+    "test")
+        log_info "测试云服务器连接..."
+        check_config
+        test_cloud_services
         ;;
     *)
         main

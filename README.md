@@ -82,11 +82,16 @@ docker-compose logs -f api
 
 ### 4. 本地开发模式（推荐）
 
+**系统架构**: 本地运行 API 和 Worker 服务，PostgreSQL 和 Redis 使用云服务器
+
 使用一键启动脚本：
 
 ```bash
 # 赋予脚本执行权限（首次运行）
-chmod +x start.sh stop.sh
+chmod +x start.sh stop.sh test_connection.py
+
+# 测试云服务器连接
+python3 test_connection.py
 
 # 启动所有服务
 ./start.sh
@@ -98,7 +103,7 @@ chmod +x start.sh stop.sh
 ./stop.sh status
 
 # 查看实时日志
-./start.sh logs
+./stop.sh logs
 ```
 
 或者手动启动：
@@ -107,8 +112,8 @@ chmod +x start.sh stop.sh
 # 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. 启动基础服务
-docker-compose up -d db redis
+# 2. 测试云服务器连接
+python3 test_connection.py
 
 # 3. 启动 API 服务
 python -m uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
@@ -117,6 +122,23 @@ python -m uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 celery -A src.tasks.celery_app worker --loglevel=info --queues=transcription
 celery -A src.tasks.celery_app worker --loglevel=info --queues=translation
 celery -A src.tasks.celery_app worker --loglevel=info --queues=packaging
+```
+
+### 5. 云服务器配置
+
+本项目使用云服务器运行 PostgreSQL 和 Redis，请在 `.env` 文件中配置：
+
+```bash
+# 云数据库配置
+DATABASE_URL=postgresql://user:password@your-db-host:5432/voicelingua
+
+# 云 Redis 配置
+REDIS_URL=redis://your-redis-host:6379/0
+REDIS_PASSWORD=your_redis_password  # 如果有密码
+
+# Celery 队列配置（通常与 REDIS_URL 相同）
+CELERY_BROKER_URL=redis://your-redis-host:6379/0
+CELERY_RESULT_BACKEND=redis://your-redis-host:6379/1
 ```
 
 ## 📚 API 使用说明
@@ -170,6 +192,12 @@ curl "http://localhost:8000/api/v1/translations/en/task-id-123/AUDIO"
 curl -X DELETE "http://localhost:8000/api/v1/tasks/{task_id}"
 ```
 
+#### 6. 查询翻译引擎状态
+
+```bash
+curl "http://localhost:8000/api/v1/translation/engine/status"
+```
+
 ### 响应示例
 
 **任务创建成功**：
@@ -208,7 +236,17 @@ WHISPER_LANGUAGE=zh         # 默认源语言
 
 ```bash
 TRANSLATION_MODEL=facebook/m2m100_418M
-MAX_TRANSLATION_LENGTH=512
+
+# 翻译引擎选择 (local|qwen|mixed)
+TRANSLATION_ENGINE=mixed
+# local: 仅使用本地模型 (M2M100)
+# qwen: 仅使用千问大模型
+# mixed: 优先使用本地模型，失败时使用千问
+
+# 千问大模型配置（可选）
+QWEN_MODEL=qwen-plus
+QWEN_API_KEY=your_qwen_api_key_here
+QWEN_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
 
 ### 系统限制配置

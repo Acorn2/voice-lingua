@@ -3,38 +3,18 @@
 """
 import logging
 from typing import Optional, Dict, Any
-import torch
+import asyncio
 import psutil
 from datetime import datetime
-from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
 
 from src.tasks.celery_app import celery_app
 from src.types.models import TaskStatus, SourceType
-from src.config.settings import settings, LANGUAGE_MAPPING
+from src.config.settings import settings
 from src.database.connection import db_manager
 from src.database.models import Task, TranslationResult
+from src.services.translation_engine_service import translation_engine_service
 
 logger = logging.getLogger(__name__)
-
-# 全局翻译模型缓存
-_translation_model = None
-_translation_tokenizer = None
-
-
-def get_translation_model():
-    """获取翻译模型（懒加载）"""
-    global _translation_model, _translation_tokenizer
-    
-    if _translation_model is None:
-        device = "cuda" if torch.cuda.is_available() and settings.whisper_device == "cuda" else "cpu"
-        logger.info(f"加载翻译模型: {settings.translation_model}, 设备: {device}")
-        
-        _translation_tokenizer = M2M100Tokenizer.from_pretrained(settings.translation_model)
-        _translation_model = M2M100ForConditionalGeneration.from_pretrained(settings.translation_model).to(device)
-        
-        logger.info("翻译模型加载完成")
-    
-    return _translation_model, _translation_tokenizer
 
 
 def check_memory_usage() -> bool:
@@ -137,7 +117,7 @@ def translate_text_task(
     """
     文本翻译任务
     
-    使用 M2M100 模型进行多语言翻译
+    使用翻译引擎服务进行多语言翻译（支持本地模型和千问大模型）
     """
     try:
         logger.info(f"开始翻译任务: {task_id} -> {target_language} ({source})")
@@ -149,67 +129,48 @@ def translate_text_task(
         # 转换来源类型
         source_type = SourceType(source)
         
-        # 检查是否需要跳过翻译（源语言与目标语言相同）
-        if target_language == settings.whisper_language:
-            translated_text = text
-            confidence = 1.0
-            logger.info(f"跳过相同语言翻译: {task_id} -> {target_language}")
-        else:
-            # 获取翻译模型
-            model, tokenizer = get_translation_model()
-            
-            # 设置源语言和目标语言
-            tokenizer.src_lang = settings.whisper_language  # 默认源语言
-            target_lang_code = LANGUAGE_MAPPING.get(target_language, target_language)
-            
-            # 执行翻译
-            logger.info(f"翻译: {settings.whisper_language} -> {target_lang_code}")
-            
-            # 编码输入文本
-            encoded = tokenizer(
-                text, 
-                return_tensors="pt", 
-                padding=True, 
-                truncation=True, 
-                max_length=settings.max_translation_length
+        # 使用翻译引擎服务进行翻译
+        async def run_translation():
+            return await translation_engine_service.translate(
+                text=text,
+                target_language=target_language,
+                source_language=settings.whisper_language
             )
-            
-            # 移动到设备
-            device = next(model.parameters()).device
-            encoded = {k: v.to(device) for k, v in encoded.items()}
-            
-            # 生成翻译
-            with torch.no_grad():
-                generated_tokens = model.generate(
-                    **encoded,
-                    forced_bos_token_id=tokenizer.get_lang_id(target_lang_code),
-                    max_length=settings.max_translation_length,
-                    num_beams=4,
-                    early_stopping=True,
-                    do_sample=False
-                )
-            
-            # 解码结果
-            translated_text = tokenizer.batch_decode(
-                generated_tokens, 
-                skip_special_tokens=True
-            )[0].strip()
-            
-            # 简单的置信度计算（基于文本长度比例）
-            confidence = min(1.0, len(translated_text) / max(1, len(text)))
+        
+        # 在 Celery 任务中运行异步函数
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            translation_result = loop.run_until_complete(run_translation())
+        finally:
+            loop.close()
+        
+        # 提取翻译结果
+        translated_text = translation_result["translated_text"]
+        confidence = translation_result.get("confidence", 0.8)
+        engine_used = translation_result.get("engine", "unknown")
+        
+        # 记录使用的引擎
+        logger.info(f"翻译完成 - 引擎: {engine_used}, 置信度: {confidence:.3f}")
+        
+        # 如果是混合模式的回退，记录详细信息
+        if translation_result.get("fallback"):
+            logger.info(f"使用回退引擎: {translation_result.get('local_error', 'Unknown error')}")
         
         # 保存翻译结果
-        translation_result = {
+        result_data = {
             "task_id": task_id,
             "source_text": text,
             "translated_text": translated_text,
             "target_language": target_language,
             "source_type": source_type.value,
             "confidence": confidence,
+            "engine": engine_used,
             "timestamp": datetime.utcnow().isoformat()
         }
         
-        save_translation_result(task_id, target_language, source_type, translation_result)
+        save_translation_result(task_id, target_language, source_type, result_data)
         
         # 检查是否所有翻译都完成
         check_all_translations_completed(task_id)
@@ -218,7 +179,8 @@ def translate_text_task(
         return {
             "status": "success", 
             "translated_text": translated_text,
-            "confidence": confidence
+            "confidence": confidence,
+            "engine": engine_used
         }
         
     except Exception as e:
@@ -226,9 +188,12 @@ def translate_text_task(
         logger.error(f"任务 {task_id} - {error_msg}")
         
         # 重试逻辑
-        if self.request.retries < self.max_retries:
+        retry_count = settings.translation_retry_count
+        if self.request.retries < retry_count:
             logger.info(f"重试翻译任务 {task_id} (第 {self.request.retries + 1} 次)")
-            raise self.retry(countdown=60, exc=e)
+            # 使用指数退避策略
+            countdown = min(60 * (2 ** self.request.retries), 300)  # 最大5分钟
+            raise self.retry(countdown=countdown, exc=e)
         
         raise e
 
@@ -243,4 +208,13 @@ def get_all_translations_by_task(task_id: str):
             return translations
     except Exception as e:
         logger.error(f"查询翻译结果失败: {e}")
-        return [] 
+        return []
+
+
+def get_translation_engine_status() -> Dict[str, Any]:
+    """获取翻译引擎状态（用于健康检查）"""
+    try:
+        return translation_engine_service.get_engine_status()
+    except Exception as e:
+        logger.error(f"获取翻译引擎状态失败: {e}")
+        return {"error": str(e)} 
