@@ -318,36 +318,33 @@ def transcribe_audio_task(self, task_id: str, audio_path: str, reference_text: O
                     }
                     save_translation_result(task_id, language, SourceType.TEXT, ref_result_data)
         
-        # === 触发翻译任务 ===
+        # === 触发批量并行翻译任务 ===
         if translation_languages:
-            logger.step("TRANSCRIPTION", "触发翻译任务", task_id,
+            logger.step("TRANSCRIPTION", "触发批量翻译任务", task_id,
                        languages_to_translate=translation_languages,
-                       has_reference=bool(reference_text))
+                       has_reference=bool(reference_text),
+                       optimization="batch_parallel")
             
-            from src.tasks.translation_task import translate_text_task
+            from src.tasks.translation_task import batch_translate_threaded_task
             
-            # 触发翻译任务 - 转录文本
-            audio_translation_count = 0
-            for language in translation_languages:
-                translate_text_task.delay(task_id, stt_text, language, SourceType.AUDIO.value)
-                audio_translation_count += 1
-                logger.step("TRANSCRIPTION", "已触发音频文本翻译", task_id, 
-                           target_language=language)
+            # 触发线程池批量翻译任务 - 转录文本（高性能多线程并行处理）
+            batch_translate_threaded_task.delay(task_id, stt_text, translation_languages, SourceType.AUDIO.value)
+            logger.step("TRANSCRIPTION", "已触发音频文本线程池批量翻译", task_id, 
+                       language_count=len(translation_languages),
+                       performance_mode="ThreadPoolExecutor")
             
-            # 如果有参考文本，也进行翻译
-            text_translation_count = 0
+            # 如果有参考文本，也进行线程池批量翻译
             if reference_text and reference_text.strip():
-                for language in translation_languages:
-                    translate_text_task.delay(task_id, reference_text.strip(), language, SourceType.TEXT.value)
-                    text_translation_count += 1
-                    logger.step("TRANSCRIPTION", "已触发参考文本翻译", task_id,
-                               target_language=language)
+                batch_translate_threaded_task.delay(task_id, reference_text.strip(), translation_languages, SourceType.TEXT.value)
+                logger.step("TRANSCRIPTION", "已触发参考文本线程池批量翻译", task_id,
+                           language_count=len(translation_languages),
+                           performance_mode="ThreadPoolExecutor")
             
-            total_translations = audio_translation_count + text_translation_count
-            logger.step("TRANSCRIPTION", "翻译任务触发完成", task_id,
-                       audio_translations=audio_translation_count,
-                       text_translations=text_translation_count,
-                       total_translations=total_translations)
+            total_batches = 2 if reference_text and reference_text.strip() else 1
+            logger.step("TRANSCRIPTION", "批量翻译任务触发完成", task_id,
+                       batch_count=total_batches,
+                       total_languages=len(translation_languages),
+                       performance_mode="高性能并行")
         else:
             logger.step("TRANSCRIPTION", "无需翻译", task_id, reason="没有需要翻译的语言")
         

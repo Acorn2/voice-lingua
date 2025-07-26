@@ -67,7 +67,30 @@ WHISPER_DEVICE=cpu  # Intel Mac 使用 cpu，生产环境使用 cuda
 DEBUG=true
 ```
 
-### 3. 使用 Docker Compose 启动（推荐）
+### 3. 数据库管理
+
+系统提供了专门的数据库管理脚本，用于管理数据库表的创建和维护：
+
+```bash
+# 创建数据库表（如果不存在）
+python manage_db.py create
+
+# 测试数据库连接
+python manage_db.py test
+
+# 查看数据库信息
+python manage_db.py info
+
+# 强制重建数据库表（会删除所有数据，谨慎使用）
+python manage_db.py recreate
+```
+
+**重要说明**：
+- 系统现在会自动检查表是否存在，只在不存在时创建，避免数据丢失
+- 如果需要重建表结构，请使用 `python manage_db.py recreate` 命令
+- 生产环境建议将 `DEBUG=false` 以确保数据安全
+
+### 4. 使用 Docker Compose 启动（推荐）
 
 ```bash
 # 启动所有服务
@@ -80,7 +103,7 @@ docker-compose ps
 docker-compose logs -f api
 ```
 
-### 4. 本地开发模式（推荐）
+### 5. 本地开发模式（推荐）
 
 **系统架构**: 本地运行 API 和 Worker 服务，PostgreSQL 和 Redis 使用云服务器
 
@@ -124,7 +147,7 @@ celery -A src.tasks.celery_app worker --loglevel=info --queues=translation --poo
 celery -A src.tasks.celery_app worker --loglevel=info --queues=packaging --pool=threads
 ```
 
-### 🍎 macOS 用户特别说明
+### 6. macOS 用户特别说明
 
 由于 macOS 系统与某些 Python 库（如 Whisper、PyTorch）存在 fork 冲突，推荐使用专门的启动方式：
 
@@ -143,7 +166,7 @@ celery -A src.tasks.celery_app worker --loglevel=info --queues=packaging --pool=
 - solo 池模式每个队列只能处理一个并发任务
 - 如果遇到 `objc[xxxxx]: +[NSMutableString initialize] may have been in progress in another thread when fork() was called` 错误，请使用上述方式
 
-### 5. 云服务器配置
+### 7. 云服务器配置
 
 本项目使用云服务器运行 PostgreSQL 和 Redis，请在 `.env` 文件中配置：
 

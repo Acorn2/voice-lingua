@@ -29,16 +29,32 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def create_tables():
     """创建数据库表"""
     try:
-        # 在开发环境中，如果遇到字段长度问题，强制重建表
-        if settings.debug:
-            logger.info("开发模式：检查并重建数据库表")
-            Base.metadata.drop_all(bind=engine)
-            logger.info("旧表已删除")
+        # 检查表是否存在，只在不存在时创建
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        existing_tables = inspector.get_table_names()
         
-        Base.metadata.create_all(bind=engine)
-        logger.info("数据库表创建成功")
+        if existing_tables:
+            logger.info(f"数据库表已存在，跳过创建: {existing_tables}")
+        else:
+            logger.info("数据库表不存在，开始创建")
+            Base.metadata.create_all(bind=engine)
+            logger.info("数据库表创建成功")
     except SQLAlchemyError as e:
         logger.error(f"创建数据库表失败: {e}")
+        raise
+
+
+def recreate_tables():
+    """强制重建数据库表（会删除所有数据）"""
+    try:
+        logger.warning("强制重建数据库表，所有数据将被删除")
+        Base.metadata.drop_all(bind=engine)
+        logger.info("旧表已删除")
+        Base.metadata.create_all(bind=engine)
+        logger.info("数据库表重建成功")
+    except SQLAlchemyError as e:
+        logger.error(f"重建数据库表失败: {e}")
         raise
 
 

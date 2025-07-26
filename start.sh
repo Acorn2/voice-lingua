@@ -70,13 +70,8 @@ check_python_env() {
     
     # 检查虚拟环境
     if [[ "$VIRTUAL_ENV" == "" ]]; then
-        log_warning "建议使用虚拟环境运行项目"
-        read -p "是否继续？(y/N): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log_info "已取消启动"
-            exit 0
-        fi
+        log_warning "未检测到虚拟环境，建议使用虚拟环境运行项目"
+        log_info "继续使用系统 Python 环境..."
     else
         log_success "虚拟环境: $VIRTUAL_ENV"
     fi
@@ -216,7 +211,7 @@ start_workers() {
     
     # 启动翻译任务 Worker (使用线程池避免 macOS fork 冲突)
     log_info "启动翻译任务 Worker..."
-    nohup celery -A src.tasks.celery_app worker --loglevel=info --queues=translation --concurrency=2 --pool=threads > logs/worker-translation.log 2>&1 &
+    nohup celery -A src.tasks.celery_app worker --loglevel=info --queues=translation --concurrency=10 --pool=threads > logs/worker-translation.log 2>&1 &
     TRANSLATION_PID=$!
     echo $TRANSLATION_PID > .worker-translation.pid
     

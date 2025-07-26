@@ -5,7 +5,10 @@ import asyncio
 import logging
 import psutil
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+import httpx
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 from src.tasks.celery_app import celery_app
 from src.types.models import TaskStatus, SourceType
@@ -437,6 +440,466 @@ def translate_text_task(
             # 使用指数退避策略
             countdown = min(60 * (2 ** self.request.retries), 300)  # 最大5分钟
             raise self.retry(countdown=countdown, exc=e)
+        
+        raise e
+
+
+@celery_app.task(bind=True, name='tasks.translation.batch_translate_threaded')
+def batch_translate_threaded_task(self, task_id: str, text: str, languages: List[str], source_type: str):
+    """
+    高性能线程池批量翻译任务
+    
+    使用 ThreadPoolExecutor 真正的多线程并行处理多语言翻译
+    - 适合CPU密集型的本地模型推理
+    - 适合I/O密集型的API调用
+    - 提供更好的资源利用率和性能
+    
+    Args:
+        task_id: 任务ID
+        text: 待翻译文本
+        languages: 目标语言列表
+        source_type: 来源类型 (AUDIO/TEXT)
+    """
+    try:
+        # === 任务开始记录 ===
+        logger.step("TRANSLATION", "线程池批量翻译任务开始", task_id,
+                   target_languages=languages,
+                   language_count=len(languages),
+                   source_type=source_type,
+                   text_preview=text[:50] + ("..." if len(text) > 50 else ""),
+                   performance_mode="ThreadPoolExecutor")
+        
+        # 更新任务状态
+        update_task_status(task_id, TaskStatus.TRANSLATION_PROCESSING)
+        
+        # === 语言检测和过滤 ===
+        detected_source_language = detect_text_language(text)
+        logger.step("TRANSLATION", "语言检测完成", task_id,
+                   detected_source=detected_source_language)
+        
+        # 过滤掉与源语言相同的目标语言
+        filtered_languages = [lang for lang in languages if lang != detected_source_language]
+        same_languages = [lang for lang in languages if lang == detected_source_language]
+        
+        logger.step("TRANSLATION", "语言过滤完成", task_id,
+                   filtered_languages=filtered_languages,
+                   same_languages=same_languages,
+                   need_translation=len(filtered_languages),
+                   skip_translation=len(same_languages))
+        
+        # === 处理相同语言（直接保存原文） ===
+        for language in same_languages:
+            result_data = {
+                "task_id": task_id,
+                "source_text": text,
+                "translated_text": text,
+                "target_language": language,
+                "source_type": source_type,
+                "confidence": 1.0,
+                "engine": "skip_same_language",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            save_translation_result(task_id, language, SourceType(source_type), result_data)
+            logger.translation_skip(task_id, language, "源语言与目标语言相同")
+        
+        # === 高性能线程池批量翻译 ===
+        batch_duration = 0
+        if filtered_languages:
+            batch_start_time = datetime.utcnow()
+            
+            def translate_language_in_thread(language: str) -> Dict[str, Any]:
+                """
+                在独立线程中执行单个语言的翻译
+                
+                每个线程有独立的事件循环，避免GIL影响
+                """
+                thread_start_time = time.time()
+                thread_id = f"T-{language}-{int(thread_start_time * 1000) % 10000}"
+                
+                try:
+                    logger.step("TRANSLATION", "线程启动", task_id,
+                               thread_id=thread_id,
+                               target_language=language,
+                               text_length=len(text))
+                    
+                    # 创建独立的事件循环
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    try:
+                        # 执行异步翻译
+                        translation_result = loop.run_until_complete(
+                            translation_engine_service.translate(
+                                text=text,
+                                target_language=language,
+                                source_language=detected_source_language
+                            )
+                        )
+                        
+                        thread_duration = time.time() - thread_start_time
+                        
+                        logger.step("TRANSLATION", "线程翻译成功", task_id,
+                                   thread_id=thread_id,
+                                   target_language=language,
+                                   thread_duration=f"{thread_duration:.2f}s",
+                                   engine=translation_result.get("engine", "unknown"),
+                                   confidence=f"{translation_result.get('confidence', 0):.3f}")
+                        
+                        return {
+                            "language": language,
+                            "result": translation_result,
+                            "success": True,
+                            "thread_duration": thread_duration,
+                            "thread_id": thread_id
+                        }
+                        
+                    finally:
+                        loop.close()
+                        
+                except Exception as e:
+                    thread_duration = time.time() - thread_start_time
+                    
+                    logger.step("TRANSLATION", "线程翻译失败", task_id,
+                               thread_id=thread_id,
+                               target_language=language,
+                               thread_duration=f"{thread_duration:.2f}s",
+                               error=str(e))
+                    
+                    return {
+                        "language": language,
+                        "result": e,
+                        "success": False,
+                        "thread_duration": thread_duration,
+                        "thread_id": thread_id
+                    }
+            
+            # 动态计算最优线程数
+            optimal_workers = min(
+                len(filtered_languages),  # 不超过语言数量
+                8,                        # 不超过8个线程（避免资源争用）
+                max(2, len(filtered_languages) // 2)  # 至少2个线程
+            )
+            
+            logger.step("TRANSLATION", "启动线程池", task_id,
+                       total_languages=len(filtered_languages),
+                       optimal_workers=optimal_workers,
+                       strategy="ThreadPoolExecutor + AsyncIO")
+            
+            # 使用线程池执行并行翻译
+            translation_results = []
+            successful_count = 0
+            failed_count = 0
+            
+            with ThreadPoolExecutor(
+                max_workers=optimal_workers,
+                thread_name_prefix=f"VoiceLingua-Translation-{task_id[:8]}"
+            ) as executor:
+                
+                # 提交所有翻译任务
+                future_to_language = {
+                    executor.submit(translate_language_in_thread, lang): lang
+                    for lang in filtered_languages
+                }
+                
+                logger.step("TRANSLATION", "所有翻译任务已提交", task_id,
+                           submitted_tasks=len(future_to_language))
+                
+                # 收集结果（按完成顺序）
+                for future in as_completed(future_to_language):
+                    language = future_to_language[future]
+                    
+                    try:
+                        thread_result = future.result()
+                        translation_results.append(thread_result)
+                        
+                        if thread_result["success"]:
+                            successful_count += 1
+                            
+                            # 保存翻译结果
+                            translation_data = thread_result["result"]
+                            result_data = {
+                                "task_id": task_id,
+                                "source_text": text,
+                                "translated_text": translation_data["translated_text"],
+                                "target_language": language,
+                                "source_type": source_type,
+                                "confidence": translation_data.get("confidence", 0.8),
+                                "engine": translation_data.get("engine", "unknown"),
+                                "timestamp": datetime.utcnow().isoformat()
+                            }
+                            
+                            save_translation_result(task_id, language, SourceType(source_type), result_data)
+                            
+                            logger.translation_complete(
+                                task_id, detected_source_language, language,
+                                translation_data.get("engine", "unknown"),
+                                translation_data.get("confidence", 0.8),
+                                thread_mode=True,
+                                thread_id=thread_result["thread_id"],
+                                thread_duration=f"{thread_result['thread_duration']:.2f}s"
+                            )
+                        else:
+                            failed_count += 1
+                            logger.translation_fail(
+                                task_id, detected_source_language, language, 
+                                str(thread_result["result"]),
+                                thread_id=thread_result["thread_id"]
+                            )
+                        
+                        completed = successful_count + failed_count
+                        logger.step("TRANSLATION", "线程结果处理", task_id,
+                                   language=language,
+                                   completed=completed,
+                                   total=len(filtered_languages),
+                                   progress=f"{completed}/{len(filtered_languages)}")
+                        
+                    except Exception as e:
+                        failed_count += 1
+                        logger.step("TRANSLATION", "线程执行异常", task_id,
+                                   language=language,
+                                   error=str(e))
+            
+            batch_duration = (datetime.utcnow() - batch_start_time).total_seconds()
+            
+            # 计算性能统计
+            thread_durations = [r["thread_duration"] for r in translation_results if r["success"]]
+            avg_thread_time = sum(thread_durations) / len(thread_durations) if thread_durations else 0
+            max_thread_time = max(thread_durations) if thread_durations else 0
+            min_thread_time = min(thread_durations) if thread_durations else 0
+            
+            logger.step("TRANSLATION", "线程池批量翻译完成", task_id,
+                       total_languages=len(filtered_languages),
+                       successful=successful_count,
+                       failed=failed_count,
+                       batch_duration=f"{batch_duration:.2f}s",
+                       avg_thread_time=f"{avg_thread_time:.2f}s",
+                       max_thread_time=f"{max_thread_time:.2f}s",
+                       min_thread_time=f"{min_thread_time:.2f}s",
+                       performance_gain=f"{len(filtered_languages) * avg_thread_time / batch_duration:.1f}x" if batch_duration > 0 else "N/A")
+            
+            logger.performance(task_id, "threaded_batch_translation", batch_duration)
+        
+        # === 检查所有翻译是否完成 ===
+        logger.step("TRANSLATION", "检查翻译完成状态", task_id)
+        check_all_translations_completed(task_id)
+        
+        return {
+            "status": "success",
+            "total_languages": len(languages),
+            "translated_count": len(filtered_languages) if filtered_languages else 0,
+            "skipped_count": len(same_languages),
+            "successful_count": successful_count if filtered_languages else 0,
+            "failed_count": failed_count if filtered_languages else 0,
+            "batch_duration": batch_duration,
+            "performance_mode": "ThreadPoolExecutor",
+            "thread_pool_size": optimal_workers if filtered_languages else 0
+        }
+        
+    except Exception as e:
+        error_msg = f"线程池批量翻译失败: {str(e)}"
+        logger.step("ERROR", "线程池批量翻译失败", task_id, error=error_msg)
+        
+        # 重试逻辑
+        if self.request.retries < 2:  # 线程池任务减少重试次数
+            logger.step("TRANSLATION", "准备重试线程池批量翻译", task_id,
+                       retry_count=self.request.retries + 1)
+            raise self.retry(countdown=30, exc=e)
+        
+        raise e
+
+
+@celery_app.task(bind=True, name='tasks.translation.batch_translate')
+def batch_translate_task(self, task_id: str, text: str, languages: List[str], source_type: str):
+    """
+    批量并行翻译任务 - 高性能优化版本
+    
+    使用 asyncio 和 httpx 并发调用多个翻译API，显著提升性能
+    
+    Args:
+        task_id: 任务ID
+        text: 待翻译文本
+        languages: 目标语言列表
+        source_type: 来源类型 (AUDIO/TEXT)
+    """
+    try:
+        # === 任务开始记录 ===
+        logger.step("TRANSLATION", "批量翻译任务开始", task_id,
+                   target_languages=languages,
+                   language_count=len(languages),
+                   source_type=source_type,
+                   text_preview=text[:50] + ("..." if len(text) > 50 else ""))
+        
+        # 更新任务状态
+        update_task_status(task_id, TaskStatus.TRANSLATION_PROCESSING)
+        
+        # === 语言检测和过滤 ===
+        detected_source_language = detect_text_language(text)
+        logger.step("TRANSLATION", "语言检测完成", task_id,
+                   detected_source=detected_source_language)
+        
+        # 过滤掉与源语言相同的目标语言
+        filtered_languages = [lang for lang in languages if lang != detected_source_language]
+        same_languages = [lang for lang in languages if lang == detected_source_language]
+        
+        logger.step("TRANSLATION", "语言过滤完成", task_id,
+                   filtered_languages=filtered_languages,
+                   same_languages=same_languages,
+                   need_translation=len(filtered_languages),
+                   skip_translation=len(same_languages))
+        
+        # === 处理相同语言（直接保存原文） ===
+        for language in same_languages:
+            result_data = {
+                "task_id": task_id,
+                "source_text": text,
+                "translated_text": text,
+                "target_language": language,
+                "source_type": source_type,
+                "confidence": 1.0,
+                "engine": "skip_same_language",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            save_translation_result(task_id, language, SourceType(source_type), result_data)
+            logger.translation_skip(task_id, language, "源语言与目标语言相同")
+        
+        # === 批量并行翻译（使用线程池） ===
+        batch_duration = 0
+        if filtered_languages:
+            batch_start_time = datetime.utcnow()
+            
+            def translate_single_language(language: str) -> tuple:
+                """单个语言的翻译函数 - 用于线程池执行"""
+                try:
+                    logger.step("TRANSLATION", "线程开始翻译", task_id,
+                               thread_language=language,
+                               thread_id=f"{time.time():.3f}")
+                    
+                    # 在线程中运行异步翻译
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    try:
+                        result = loop.run_until_complete(
+                            translation_engine_service.translate(
+                                text=text,
+                                target_language=language,
+                                source_language=detected_source_language
+                            )
+                        )
+                        logger.step("TRANSLATION", "线程翻译完成", task_id,
+                                   thread_language=language,
+                                   success=True)
+                        return (language, result)
+                    finally:
+                        loop.close()
+                        
+                except Exception as e:
+                    logger.step("TRANSLATION", "线程翻译失败", task_id,
+                               thread_language=language,
+                               error=str(e))
+                    return (language, e)
+            
+            # 使用线程池并行执行翻译任务
+            max_workers = min(len(filtered_languages), 8)  # 最多8个并发线程
+            logger.step("TRANSLATION", "启动线程池翻译", task_id,
+                       total_languages=len(filtered_languages),
+                       max_workers=max_workers,
+                       thread_pool_mode="ThreadPoolExecutor")
+            
+            translation_results = []
+            
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"Translation-{task_id[:8]}") as executor:
+                # 提交所有翻译任务到线程池
+                future_to_language = {
+                    executor.submit(translate_single_language, language): language 
+                    for language in filtered_languages
+                }
+                
+                # 收集完成的结果
+                for future in as_completed(future_to_language):
+                    language = future_to_language[future]
+                    try:
+                        result = future.result()
+                        translation_results.append(result)
+                        logger.step("TRANSLATION", "线程结果收集", task_id,
+                                   completed_language=language,
+                                   remaining=len(future_to_language) - len(translation_results))
+                    except Exception as e:
+                        logger.step("TRANSLATION", "线程执行异常", task_id,
+                                   failed_language=language,
+                                   error=str(e))
+                        translation_results.append((language, e))
+            
+            batch_duration = (datetime.utcnow() - batch_start_time).total_seconds()
+            
+            logger.step("TRANSLATION", "线程池翻译完成", task_id,
+                       total_duration=f"{batch_duration:.2f}s",
+                       languages_processed=len(translation_results),
+                       avg_time_per_language=f"{batch_duration/len(filtered_languages):.2f}s")
+            
+            # === 处理翻译结果 ===
+            successful_count = 0
+            failed_count = 0
+            
+            for language, result in translation_results:
+                if isinstance(result, Exception):
+                    # 翻译失败
+                    failed_count += 1
+                    logger.translation_fail(task_id, detected_source_language, language, str(result))
+                else:
+                    # 翻译成功
+                    successful_count += 1
+                    translated_text = result["translated_text"]
+                    confidence = result.get("confidence", 0.8)
+                    engine_used = result.get("engine", "unknown")
+                    
+                    logger.translation_complete(task_id, detected_source_language, language,
+                                              engine_used, confidence,
+                                              batch_mode=True)
+                    
+                    # 保存翻译结果
+                    result_data = {
+                        "task_id": task_id,
+                        "source_text": text,
+                        "translated_text": translated_text,
+                        "target_language": language,
+                        "source_type": source_type,
+                        "confidence": confidence,
+                        "engine": engine_used,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    
+                    save_translation_result(task_id, language, SourceType(source_type), result_data)
+            
+            logger.step("TRANSLATION", "批量翻译完成", task_id,
+                       total_languages=len(filtered_languages),
+                       successful=successful_count,
+                       failed=failed_count,
+                       batch_duration=f"{batch_duration:.2f}s",
+                       avg_per_language=f"{batch_duration/len(filtered_languages):.2f}s")
+            logger.performance(task_id, "batch_translation", batch_duration)
+        
+        # === 检查所有翻译是否完成 ===
+        logger.step("TRANSLATION", "检查翻译完成状态", task_id)
+        check_all_translations_completed(task_id)
+        
+        return {
+            "status": "success",
+            "total_languages": len(languages),
+            "translated_count": len(filtered_languages),
+            "skipped_count": len(same_languages),
+            "batch_duration": batch_duration if filtered_languages else 0
+        }
+        
+    except Exception as e:
+        error_msg = f"批量翻译失败: {str(e)}"
+        logger.step("ERROR", "批量翻译失败", task_id, error=error_msg)
+        
+        # 重试逻辑
+        if self.request.retries < 2:  # 批量任务减少重试次数
+            logger.step("TRANSLATION", "准备重试批量翻译", task_id,
+                       retry_count=self.request.retries + 1)
+            raise self.retry(countdown=30, exc=e)
         
         raise e
 

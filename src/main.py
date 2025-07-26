@@ -267,9 +267,9 @@ async def create_text_task(
             db=db
         )
         
-        # 异步触发翻译任务
-        for language in target_languages:
-            translate_text_task.delay(task_id, request.text_content, language, SourceType.TEXT.value)
+        # 异步触发线程池批量翻译任务（高性能多线程优化）
+        from src.tasks.translation_task import batch_translate_threaded_task
+        batch_translate_threaded_task.delay(task_id, request.text_content, target_languages, SourceType.TEXT.value)
         
         logger.info(f"文本任务创建成功: {task_id}")
         

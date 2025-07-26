@@ -177,9 +177,13 @@ CELERY_CONFIG = {
     "task_track_started": True,
     "task_time_limit": 30 * 60,  # 30分钟超时
     "task_soft_time_limit": 25 * 60,  # 25分钟软超时
-    "worker_prefetch_multiplier": 1,
+    "worker_prefetch_multiplier": 4,  # 提升任务预取数量
     "task_acks_late": True,
     "worker_disable_rate_limits": True,
+    # 高性能优化配置
+    "task_compression": "gzip",  # 启用任务压缩
+    "result_compression": "gzip",  # 启用结果压缩
+    "worker_max_tasks_per_child": 100,  # 防止内存泄露
     "task_default_retry_delay": 60,
     "task_max_retries": 3,
     # 解决 macOS fork 冲突问题
