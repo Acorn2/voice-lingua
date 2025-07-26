@@ -1,0 +1,115 @@
+version: '3.8'
+
+services:
+  # API 服务
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@db:5432/voicelingua
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - TENCENT_SECRET_ID=${TENCENT_SECRET_ID}
+      - TENCENT_SECRET_KEY=${TENCENT_SECRET_KEY}
+      - COS_BUCKET_NAME=${COS_BUCKET_NAME}
+      - SECRET_KEY=${SECRET_KEY}
+      - DEBUG=false
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  # Celery Worker - 转录任务
+  worker-transcription:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@db:5432/voicelingua
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - TENCENT_SECRET_ID=${TENCENT_SECRET_ID}
+      - TENCENT_SECRET_KEY=${TENCENT_SECRET_KEY}
+      - COS_BUCKET_NAME=${COS_BUCKET_NAME}
+      - SECRET_KEY=${SECRET_KEY}
+      - WHISPER_DEVICE=cpu  # 开发环境使用 CPU
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    command: celery -A src.tasks.celery_app worker --loglevel=info --queues=transcription --concurrency=1
+    restart: unless-stopped
+
+  # Celery Worker - 翻译任务
+  worker-translation:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@db:5432/voicelingua
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - TENCENT_SECRET_ID=${TENCENT_SECRET_ID}
+      - TENCENT_SECRET_KEY=${TENCENT_SECRET_KEY}
+      - COS_BUCKET_NAME=${COS_BUCKET_NAME}
+      - SECRET_KEY=${SECRET_KEY}
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    command: celery -A src.tasks.celery_app worker --loglevel=info --queues=translation --concurrency=2
+    restart: unless-stopped
+
+  # Celery Worker - 打包任务
+  worker-packaging:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@db:5432/voicelingua
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - TENCENT_SECRET_ID=${TENCENT_SECRET_ID}
+      - TENCENT_SECRET_KEY=${TENCENT_SECRET_KEY}
+      - COS_BUCKET_NAME=${COS_BUCKET_NAME}
+      - SECRET_KEY=${SECRET_KEY}
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    command: celery -A src.tasks.celery_app worker --loglevel=info --queues=packaging --concurrency=1
+    restart: unless-stopped
+
+  # PostgreSQL 数据库
+  db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: voicelingua
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  # Redis
+  redis:
+    image: redis:6-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data: 
