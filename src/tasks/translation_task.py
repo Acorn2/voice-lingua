@@ -82,16 +82,18 @@ def check_all_translations_completed(task_id: str) -> bool:
                 TranslationResult.task_id == task_id
             ).all()
             
-            # 计算期待的翻译数量
-            expected_count = len(task.languages)
+            # 计算期待的翻译数量（排除源语言）
+            from src.config.settings import settings
+            target_languages = [lang for lang in task.languages if lang != settings.whisper_language]
+            expected_count = len(target_languages)
             
             # 如果是音频任务且有参考文本，翻译数量会翻倍
-            if task.task_type == "audio" and task.reference_text:
+            if task.task_type == "audio" and task.reference_text and task.reference_text.strip():
                 expected_count *= 2
             
             actual_count = len(translations)
             
-            logger.info(f"翻译进度检查: {task_id} - {actual_count}/{expected_count}")
+            logger.info(f"翻译进度检查: {task_id} - {actual_count}/{expected_count} (目标语言: {target_languages})")
             
             if actual_count >= expected_count:
                 # 触发打包任务

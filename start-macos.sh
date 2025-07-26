@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# VoiceLingua 本地启动脚本
-# 用于在本地环境启动所有必要的服务
-# PostgreSQL 和 Redis 使用云服务器，无需本地启动
+# macOS 专用启动脚本 - 解决 fork 冲突问题
+# 使用 solo 池（单进程模式）完全避免 fork 相关问题
+# 参考 start.sh 添加完整的启动流程
 
 set -e  # 遇到错误立即退出
 
-# 检测并设置正确的 Python 执行器
+# 检测并设置正确的 Python 执行器（参考 start.sh）
 PYTHON_CMD="python3"
 
 # 如果在 zsh 中有 python3 alias，尝试获取真实路径
@@ -202,30 +202,33 @@ start_api() {
     fi
 }
 
-# 启动 Celery Workers
-start_workers() {
-    log_info "启动 Celery Worker 进程..."
+# 启动 Celery Workers (macOS 使用 solo 池)
+start_workers_macos() {
+    log_info "启动 Celery Worker 进程 (macOS solo 模式)..."
     
-    # 启动转录任务 Worker (使用线程池避免 macOS fork 冲突)
+    log_warning "在 macOS 上使用 solo 池模式，完全避免 fork 冲突"
+    log_warning "注意：solo 模式每个队列只能有一个并发任务"
+    
+    # 启动转录任务 Worker (solo 池)
     log_info "启动转录任务 Worker..."
-    nohup celery -A src.tasks.celery_app worker --loglevel=info --queues=transcription --concurrency=1 --pool=threads > logs/worker-transcription.log 2>&1 &
+    nohup celery -A src.tasks.celery_app worker --loglevel=info --queues=transcription --pool=solo > logs/worker-transcription.log 2>&1 &
     TRANSCRIPTION_PID=$!
     echo $TRANSCRIPTION_PID > .worker-transcription.pid
     
-    # 启动翻译任务 Worker (使用线程池避免 macOS fork 冲突)
+    # 启动翻译任务 Worker (solo 池)
     log_info "启动翻译任务 Worker..."
-    nohup celery -A src.tasks.celery_app worker --loglevel=info --queues=translation --concurrency=2 --pool=threads > logs/worker-translation.log 2>&1 &
+    nohup celery -A src.tasks.celery_app worker --loglevel=info --queues=translation --pool=solo > logs/worker-translation.log 2>&1 &
     TRANSLATION_PID=$!
     echo $TRANSLATION_PID > .worker-translation.pid
     
-    # 启动打包任务 Worker (使用线程池避免 macOS fork 冲突)
+    # 启动打包任务 Worker (solo 池)
     log_info "启动打包任务 Worker..."
-    nohup celery -A src.tasks.celery_app worker --loglevel=info --queues=packaging --concurrency=1 --pool=threads > logs/worker-packaging.log 2>&1 &
+    nohup celery -A src.tasks.celery_app worker --loglevel=info --queues=packaging --pool=solo > logs/worker-packaging.log 2>&1 &
     PACKAGING_PID=$!
     echo $PACKAGING_PID > .worker-packaging.pid
     
     sleep 3
-    log_success "Celery Workers 启动完成"
+    log_success "Celery Workers 启动完成 (solo 模式)"
     log_info "转录 Worker PID: $TRANSCRIPTION_PID"
     log_info "翻译 Worker PID: $TRANSLATION_PID"
     log_info "打包 Worker PID: $PACKAGING_PID"
@@ -234,7 +237,7 @@ start_workers() {
 # 显示服务状态
 show_status() {
     echo
-    log_success "=== VoiceLingua 服务启动完成 ==="
+    log_success "=== VoiceLingua macOS 服务启动完成 ==="
     echo
     log_info "服务地址:"
     echo "  🌐 API 服务:        http://localhost:8000"
@@ -251,20 +254,27 @@ show_status() {
     log_info "管理命令:"
     echo "  停止服务:          ./stop.sh"
     echo "  检查状态:          ./stop.sh status"
-    echo "  查看日志:          ./start.sh logs"
+    echo "  查看日志:          tail -f logs/*.log"
+    echo
+    log_warning "macOS 使用说明:"
+    echo "  - 使用 solo 池模式避免 fork 冲突"
+    echo "  - 如遇到任何问题，请查看对应的日志文件"
+    echo "  - 建议使用虚拟环境以避免依赖冲突"
     echo
 }
 
 # 主函数
 main() {
     echo
-    log_info "正在启动 VoiceLingua 语音转录与翻译系统..."
+    log_info "正在启动 VoiceLingua 语音转录与翻译系统 (macOS 版本)..."
     log_info "使用云服务器上的 PostgreSQL 和 Redis"
+    log_warning "本脚本专为 macOS 设计，使用 solo 池避免 fork 冲突"
     echo
     
     # 基础检查
     check_command "python3"
     check_command "curl"
+    check_command "lsof"
     
     # 检查和准备环境
     check_python_env
@@ -277,7 +287,7 @@ main() {
     
     # 启动本地服务
     start_api
-    start_workers
+    start_workers_macos
     
     # 显示状态
     show_status
@@ -340,4 +350,4 @@ case "${1:-}" in
     *)
         main
         ;;
-esac 
+esac

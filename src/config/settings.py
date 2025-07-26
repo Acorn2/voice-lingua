@@ -182,6 +182,9 @@ CELERY_CONFIG = {
     "worker_disable_rate_limits": True,
     "task_default_retry_delay": 60,
     "task_max_retries": 3,
+    # 解决 macOS fork 冲突问题
+    "worker_pool": "threads",  # 使用线程池而不是进程池
+    "worker_pool_restarts": True,
     "task_routes": {
         "tasks.transcription.*": {"queue": "transcription"},
         "tasks.translation.*": {"queue": "translation"},

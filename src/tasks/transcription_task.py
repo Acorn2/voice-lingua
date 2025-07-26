@@ -161,19 +161,30 @@ def transcribe_audio_task(self, task_id: str, audio_path: str, reference_text: O
                 raise Exception(f"任务不存在: {task_id}")
             
             target_languages = task.languages
+            
+            # 更新转录结果到数据库
+            task.text_content = stt_text
+            task.updated_at = datetime.utcnow()
+            db.commit()
         
         # 导入翻译任务（避免循环导入）
         from src.tasks.translation_task import translate_text_task
         
-        # 触发翻译任务 - 转录文本
-        for language in target_languages:
-            if language != settings.whisper_language:  # 跳过源语言
-                translate_text_task.delay(task_id, stt_text, language, SourceType.AUDIO.value)
+        # 计算需要翻译的语言数量（排除源语言）
+        translation_languages = [lang for lang in target_languages if lang != settings.whisper_language]
         
-        # 如果有参考文本，也进行翻译
-        if reference_text and reference_text.strip():
-            for language in target_languages:
-                if language != settings.whisper_language:  # 跳过源语言
+        # 如果没有需要翻译的语言，直接标记为完成
+        if not translation_languages:
+            update_task_status(task_id, TaskStatus.COMPLETED)
+            logger.info(f"任务无需翻译，直接完成: {task_id}")
+        else:
+            # 触发翻译任务 - 转录文本
+            for language in translation_languages:
+                translate_text_task.delay(task_id, stt_text, language, SourceType.AUDIO.value)
+            
+            # 如果有参考文本，也进行翻译
+            if reference_text and reference_text.strip():
+                for language in translation_languages:
                     translate_text_task.delay(task_id, reference_text.strip(), language, SourceType.TEXT.value)
         
         logger.info(f"转录任务完成: {task_id}")

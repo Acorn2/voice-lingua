@@ -118,11 +118,30 @@ python3 test_connection.py
 # 3. 启动 API 服务
 python -m uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 
-# 4. 启动 Celery Worker (新终端)
-celery -A src.tasks.celery_app worker --loglevel=info --queues=transcription
-celery -A src.tasks.celery_app worker --loglevel=info --queues=translation
-celery -A src.tasks.celery_app worker --loglevel=info --queues=packaging
+# 4. 启动 Celery Worker (新终端) - macOS 用户使用线程池避免 fork 冲突
+celery -A src.tasks.celery_app worker --loglevel=info --queues=transcription --pool=threads
+celery -A src.tasks.celery_app worker --loglevel=info --queues=translation --pool=threads
+celery -A src.tasks.celery_app worker --loglevel=info --queues=packaging --pool=threads
 ```
+
+### 🍎 macOS 用户特别说明
+
+由于 macOS 系统与某些 Python 库（如 Whisper、PyTorch）存在 fork 冲突，推荐使用专门的启动方式：
+
+```bash
+# 推荐：使用专用的 macOS 启动脚本
+chmod +x start-macos.sh
+./start-macos.sh
+
+# 或手动使用 solo 池模式
+celery -A src.tasks.celery_app worker --loglevel=info --queues=transcription --pool=solo
+celery -A src.tasks.celery_app worker --loglevel=info --queues=translation --pool=solo
+celery -A src.tasks.celery_app worker --loglevel=info --queues=packaging --pool=solo
+```
+
+**注意**：
+- solo 池模式每个队列只能处理一个并发任务
+- 如果遇到 `objc[xxxxx]: +[NSMutableString initialize] may have been in progress in another thread when fork() was called` 错误，请使用上述方式
 
 ### 5. 云服务器配置
 

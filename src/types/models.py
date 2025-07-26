@@ -15,6 +15,25 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    
+    # 细化的状态 - 转录阶段
+    TRANSCRIPTION_PENDING = "transcription_pending"
+    TRANSCRIPTION_PROCESSING = "transcription_processing"
+    TRANSCRIPTION_COMPLETED = "transcription_completed"
+    TRANSCRIPTION_FAILED = "transcription_failed"
+    
+    # 细化的状态 - 翻译阶段
+    TRANSLATION_PENDING = "translation_pending"
+    TRANSLATION_PROCESSING = "translation_processing"
+    TRANSLATION_COMPLETED = "translation_completed"
+    TRANSLATION_FAILED = "translation_failed"
+    TRANSLATION_CANCELLED = "translation_cancelled"
+    
+    # 细化的状态 - 打包阶段
+    PACKAGING_PENDING = "packaging_pending"
+    PACKAGING_PROCESSING = "packaging_processing"
+    PACKAGING_COMPLETED = "packaging_completed"
+    PACKAGING_FAILED = "packaging_failed"
 
 
 class SourceType(str, Enum):

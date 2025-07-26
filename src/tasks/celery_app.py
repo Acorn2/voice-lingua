@@ -20,8 +20,8 @@ celery_app.autodiscover_tasks([
 # 配置任务路由
 celery_app.conf.update(
     task_routes={
-        'src.tasks.transcription_task.*': {'queue': 'transcription'},
-        'src.tasks.translation_task.*': {'queue': 'translation'},
-        'src.tasks.packaging_task.*': {'queue': 'packaging'},
+        'tasks.transcription.*': {'queue': 'transcription'},
+        'tasks.translation.*': {'queue': 'translation'},
+        'packaging.*': {'queue': 'packaging'},
     }
 ) 
