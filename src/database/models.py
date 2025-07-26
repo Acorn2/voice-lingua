@@ -18,7 +18,7 @@ class Task(Base):
     
     task_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_type = Column(String(20), nullable=False)  # 'audio' 或 'text'
-    status = Column(String(20), nullable=False, default='pending')
+    status = Column(String(30), nullable=False, default='transcription_pending')
     languages = Column(JSON, nullable=False)  # 目标语言列表
     audio_file_path = Column(Text, nullable=True)
     text_content = Column(Text, nullable=True)

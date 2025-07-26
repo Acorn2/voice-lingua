@@ -10,12 +10,6 @@ import uuid
 
 class TaskStatus(str, Enum):
     """任务状态枚举"""
-    PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    
     # 细化的状态 - 转录阶段
     TRANSCRIPTION_PENDING = "transcription_pending"
     TRANSCRIPTION_PROCESSING = "transcription_processing"
@@ -51,13 +45,11 @@ class TaskType(str, Enum):
 # API 请求模型
 class AudioTaskRequest(BaseModel):
     """音频任务创建请求"""
-    languages: List[str] = Field(..., description="目标翻译语言列表", min_items=1)
     reference_text: Optional[str] = Field(None, description="参考文本用于准确性校验")
 
     class Config:
         json_schema_extra = {
             "example": {
-                "languages": ["en", "zh", "ja"],
                 "reference_text": "这是参考文本"
             }
         }
@@ -65,13 +57,11 @@ class AudioTaskRequest(BaseModel):
 
 class TextTaskRequest(BaseModel):
     """文本任务创建请求"""
-    languages: List[str] = Field(..., description="目标翻译语言列表", min_items=1)
     text_content: str = Field(..., description="待翻译的文本内容", min_length=1)
 
     class Config:
         json_schema_extra = {
             "example": {
-                "languages": ["en", "zh-tw", "ja"],
                 "text_content": "Hello, this is a test text for translation."
             }
         }

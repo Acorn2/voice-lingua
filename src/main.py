@@ -29,10 +29,15 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(settings.log_file, encoding='utf-8'),
+        logging.FileHandler(settings.log_file, mode='w', encoding='utf-8'),  # 使用 'w' 模式重写文件
         logging.StreamHandler()
     ]
 )
+
+# 减少 SQLAlchemy 日志的详细程度
+logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
+logging.getLogger('sqlalchemy.pool').setLevel(logging.WARNING)
+logging.getLogger('sqlalchemy.dialects').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -134,10 +139,18 @@ def create_task_record(
         else:
             should_close = False
         
+        # 根据任务类型设置初始状态
+        if task_type == "audio":
+            initial_status = TaskStatus.TRANSCRIPTION_PENDING.value
+        elif task_type == "text":
+            initial_status = TaskStatus.TRANSLATION_PENDING.value
+        else:
+            initial_status = TaskStatus.TRANSCRIPTION_PENDING.value  # 默认状态
+        
         task = Task(
             task_id=task_id,
             task_type=task_type,
-            status=TaskStatus.PENDING.value,
+            status=initial_status,
             languages=languages,
             audio_file_path=audio_file,
             text_content=text_content,
@@ -166,7 +179,6 @@ def create_task_record(
 @app.post("/api/v1/tasks/audio", response_model=TaskResponse)
 async def create_audio_task(
     audio_file: UploadFile = File(..., description="音频文件 (MP3/WAV)"),
-    languages: str = Form(..., description="目标语言列表，逗号分隔"),
     reference_text: Optional[str] = Form(None, description="参考文本"),
     db: Session = Depends(get_db)
 ):
@@ -174,7 +186,7 @@ async def create_audio_task(
     创建音频转录与翻译任务
     
     支持的音频格式：MP3, WAV, M4A, FLAC
-    支持的语言：en, zh, zh-tw, ja, ko, fr, de, es, it, ru
+    自动翻译为所有支持的语言：en, zh, zh-tw, ja, ko, fr, de, es, it, ru
     """
     try:
         # 验证音频文件格式
@@ -188,18 +200,9 @@ async def create_audio_task(
                 detail=f"不支持的音频格式: {file_extension}。支持的格式: {', '.join(settings.supported_audio_formats)}"
             )
         
-        # 解析语言列表
-        target_languages = [lang.strip() for lang in languages.split(',') if lang.strip()]
-        if not target_languages:
-            raise HTTPException(status_code=400, detail="目标语言列表不能为空")
-        
-        # 验证语言是否支持
-        invalid_languages = [lang for lang in target_languages if lang not in settings.supported_languages]
-        if invalid_languages:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"不支持的语言: {', '.join(invalid_languages)}。支持的语言: {', '.join(settings.supported_languages)}"
-            )
+        # 使用配置中的所有支持语言作为目标语言
+        target_languages = settings.get_supported_languages()
+        logger.info(f"使用配置的目标语言: {target_languages}")
         
         # 生成任务ID
         task_id = str(uuid.uuid4())
@@ -224,7 +227,7 @@ async def create_audio_task(
         
         return TaskResponse(
             task_id=task_id,
-            status=TaskStatus.PENDING,
+            status=TaskStatus.TRANSCRIPTION_PENDING,
             created_at=task.created_at.isoformat(),
             languages=target_languages
         )
@@ -244,16 +247,12 @@ async def create_text_task(
     """
     创建文本翻译任务
     
-    直接翻译用户提供的文本内容
+    自动翻译为所有支持的语言：en, zh, zh-tw, ja, ko, fr, de, es, it, ru
     """
     try:
-        # 验证语言是否支持
-        invalid_languages = [lang for lang in request.languages if lang not in settings.supported_languages]
-        if invalid_languages:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"不支持的语言: {', '.join(invalid_languages)}。支持的语言: {', '.join(settings.supported_languages)}"
-            )
+        # 使用配置中的所有支持语言作为目标语言
+        target_languages = settings.get_supported_languages()
+        logger.info(f"使用配置的目标语言: {target_languages}")
         
         task_id = str(uuid.uuid4())
         
@@ -261,22 +260,22 @@ async def create_text_task(
         task = create_task_record(
             task_id=task_id,
             task_type="text",
-            languages=request.languages,
+            languages=target_languages,
             text_content=request.text_content,
             db=db
         )
         
         # 异步触发翻译任务
-        for language in request.languages:
+        for language in target_languages:
             translate_text_task.delay(task_id, request.text_content, language, SourceType.TEXT.value)
         
         logger.info(f"文本任务创建成功: {task_id}")
         
         return TaskResponse(
             task_id=task_id,
-            status=TaskStatus.PENDING,
+            status=TaskStatus.TRANSLATION_PENDING,
             created_at=task.created_at.isoformat(),
-            languages=request.languages
+            languages=target_languages
         )
         
     except HTTPException:
@@ -323,10 +322,25 @@ async def cancel_task(task_id: str, db: Session = Depends(get_db)):
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
         
-        if task.status in [TaskStatus.COMPLETED.value, TaskStatus.FAILED.value]:
-            raise HTTPException(status_code=400, detail="任务已完成，无法取消")
+        # 检查任务是否已完成或失败，无法取消
+        completed_statuses = [
+            TaskStatus.TRANSCRIPTION_COMPLETED.value,
+            TaskStatus.TRANSLATION_COMPLETED.value,
+            TaskStatus.PACKAGING_COMPLETED.value,
+            TaskStatus.TRANSCRIPTION_FAILED.value,
+            TaskStatus.TRANSLATION_FAILED.value,
+            TaskStatus.PACKAGING_FAILED.value
+        ]
         
-        task.status = TaskStatus.CANCELLED.value
+        if task.status in completed_statuses:
+            raise HTTPException(status_code=400, detail="任务已完成或失败，无法取消")
+        
+        # 根据当前状态设置相应的取消状态
+        if task.status.startswith("translation"):
+            task.status = TaskStatus.TRANSLATION_CANCELLED.value
+        else:
+            # 对于转录和打包阶段，使用翻译取消状态作为通用取消状态
+            task.status = TaskStatus.TRANSLATION_CANCELLED.value
         task.updated_at = datetime.utcnow()
         db.commit()
         

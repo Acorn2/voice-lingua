@@ -29,6 +29,12 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def create_tables():
     """创建数据库表"""
     try:
+        # 在开发环境中，如果遇到字段长度问题，强制重建表
+        if settings.debug:
+            logger.info("开发模式：检查并重建数据库表")
+            Base.metadata.drop_all(bind=engine)
+            logger.info("旧表已删除")
+        
         Base.metadata.create_all(bind=engine)
         logger.info("数据库表创建成功")
     except SQLAlchemyError as e:

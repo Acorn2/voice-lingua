@@ -106,8 +106,8 @@ def transcribe_audio_task(self, task_id: str, audio_path: str, reference_text: O
         if not check_memory_usage():
             raise Exception(f"内存使用率过高: {psutil.virtual_memory().percent:.1f}%，暂停处理")
         
-        # 更新任务状态为处理中
-        update_task_status(task_id, TaskStatus.PROCESSING, {"message": "开始转录"})
+        # 更新任务状态为转录处理中
+        update_task_status(task_id, TaskStatus.TRANSCRIPTION_PROCESSING, {"message": "开始转录"})
         
         # 获取 Whisper 模型
         model = get_whisper_model()
@@ -170,14 +170,76 @@ def transcribe_audio_task(self, task_id: str, audio_path: str, reference_text: O
         # 导入翻译任务（避免循环导入）
         from src.tasks.translation_task import translate_text_task
         
-        # 计算需要翻译的语言数量（排除源语言）
-        translation_languages = [lang for lang in target_languages if lang != settings.whisper_language]
+        # 检测转录文本的实际语言（简单检测）
+        def detect_text_language(text):
+            """简单的语言检测"""
+            # 检查是否包含中文字符
+            chinese_chars = sum(1 for char in text if '\u4e00' <= char <= '\u9fff')
+            total_chars = len([c for c in text if c.isalpha() or '\u4e00' <= c <= '\u9fff'])
+            
+            if total_chars == 0:
+                return 'unknown'
+            
+            chinese_ratio = chinese_chars / total_chars
+            if chinese_ratio > 0.3:  # 如果中文字符超过30%，认为是中文
+                return 'zh'
+            elif chinese_ratio < 0.1:  # 如果中文字符少于10%，认为是英文
+                return 'en'
+            else:
+                return 'mixed'  # 混合语言
         
-        # 如果没有需要翻译的语言，直接标记为完成
-        if not translation_languages:
-            update_task_status(task_id, TaskStatus.COMPLETED)
-            logger.info(f"任务无需翻译，直接完成: {task_id}")
+        detected_language = detect_text_language(stt_text)
+        logger.info(f"检测到转录文本语言: {detected_language}, 文本: {stt_text[:50]}...")
+        
+        # 根据检测结果决定翻译策略
+        if detected_language == 'unknown':
+            # 如果无法检测语言，翻译所有目标语言
+            translation_languages = target_languages
+        elif detected_language == 'mixed':
+            # 如果是混合语言，翻译所有目标语言
+            translation_languages = target_languages
         else:
+            # 过滤掉与检测到的语言相同的目标语言（避免重复翻译）
+            translation_languages = [lang for lang in target_languages if lang != detected_language]
+        
+        # 更新任务状态为翻译待处理
+        update_task_status(task_id, TaskStatus.TRANSLATION_PENDING)
+        
+        # 处理源语言与目标语言相同的情况
+        same_language_targets = [lang for lang in target_languages if lang == detected_language]
+        if same_language_targets:
+            # 为相同语言直接保存原文作为翻译结果
+            from src.tasks.translation_task import save_translation_result
+            for language in same_language_targets:
+                result_data = {
+                    "task_id": task_id,
+                    "source_text": stt_text,
+                    "translated_text": stt_text,  # 原文作为翻译结果
+                    "target_language": language,
+                    "source_type": SourceType.AUDIO.value,
+                    "confidence": 1.0,  # 原文置信度为1.0
+                    "engine": "skip_same_language",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                save_translation_result(task_id, language, SourceType.AUDIO, result_data)
+                logger.info(f"源语言与目标语言相同({language})，直接保存原文: {task_id}")
+                
+                # 如果有参考文本，也保存
+                if reference_text and reference_text.strip():
+                    ref_result_data = {
+                        "task_id": task_id,
+                        "source_text": reference_text.strip(),
+                        "translated_text": reference_text.strip(),
+                        "target_language": language,
+                        "source_type": SourceType.TEXT.value,
+                        "confidence": 1.0,
+                        "engine": "skip_same_language",
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    save_translation_result(task_id, language, SourceType.TEXT, ref_result_data)
+        
+        # 触发需要翻译的语言任务
+        if translation_languages:
             # 触发翻译任务 - 转录文本
             for language in translation_languages:
                 translate_text_task.delay(task_id, stt_text, language, SourceType.AUDIO.value)
@@ -186,6 +248,12 @@ def transcribe_audio_task(self, task_id: str, audio_path: str, reference_text: O
             if reference_text and reference_text.strip():
                 for language in translation_languages:
                     translate_text_task.delay(task_id, reference_text.strip(), language, SourceType.TEXT.value)
+            
+            logger.info(f"已触发翻译任务，目标语言: {translation_languages}")
+        
+        # 检查是否所有翻译都完成（包括跳过的）
+        from src.tasks.translation_task import check_all_translations_completed
+        check_all_translations_completed(task_id)
         
         logger.info(f"转录任务完成: {task_id}")
         return {
@@ -198,14 +266,14 @@ def transcribe_audio_task(self, task_id: str, audio_path: str, reference_text: O
     except FileNotFoundError as e:
         error_msg = f"音频文件不存在: {str(e)}"
         logger.error(f"任务 {task_id} - {error_msg}")
-        update_task_status(task_id, TaskStatus.FAILED, {"error": error_msg})
+        update_task_status(task_id, TaskStatus.TRANSCRIPTION_FAILED, {"error": error_msg})
         raise
         
     except Exception as e:
         error_msg = f"转录失败: {str(e)}"
         logger.error(f"任务 {task_id} - {error_msg}")
         
-        update_task_status(task_id, TaskStatus.FAILED, {"error": error_msg})
+        update_task_status(task_id, TaskStatus.TRANSCRIPTION_FAILED, {"error": error_msg})
         
         # 重试逻辑
         if self.request.retries < self.max_retries:

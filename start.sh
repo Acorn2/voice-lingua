@@ -116,6 +116,29 @@ create_directories() {
     log_success "目录创建完成"
 }
 
+# 清理旧日志文件
+clean_old_logs() {
+    log_info "清理旧日志文件..."
+    
+    # 清理主要日志文件
+    log_files=(
+        "logs/api.log"
+        "logs/worker-transcription.log"
+        "logs/worker-translation.log"
+        "logs/worker-packaging.log"
+        "logs/voicelingua.log"
+    )
+    
+    for log_file in "${log_files[@]}"; do
+        if [[ -f "$log_file" ]]; then
+            > "$log_file"  # 清空文件内容但保留文件
+            log_info "清理日志文件: $log_file"
+        fi
+    done
+    
+    log_success "旧日志文件清理完成"
+}
+
 # 检查配置文件
 check_config() {
     log_info "检查配置文件..."
@@ -270,6 +293,7 @@ main() {
     check_python_env
     check_config
     create_directories
+    clean_old_logs  # 清理旧日志文件
     install_dependencies
     
     # 测试云服务连接
