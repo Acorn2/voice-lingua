@@ -78,6 +78,16 @@ def save_translation_result(
     """保存翻译结果"""
     try:
         with db_manager.get_session() as db:
+            # 获取任务信息以提取文本编号
+            task = db.query(Task).filter(Task.task_id == task_id).first()
+            if not task:
+                logger.step("ERROR", "任务不存在，无法保存翻译结果", task_id)
+                return
+            
+            # 提取文本编号
+            from src.utils.text_number_extractor import extract_text_number_from_task
+            text_number = extract_text_number_from_task(task, target_language, source.value)
+            
             # 检查是否已存在相同的翻译结果
             existing = db.query(TranslationResult).filter(
                 TranslationResult.task_id == task_id,
@@ -87,14 +97,16 @@ def save_translation_result(
             
             if existing:
                 # 更新现有记录
+                existing.text_number = text_number
                 existing.translated_text = translation_data["translated_text"]
                 existing.confidence = translation_data.get("confidence")
                 logger.step("TRANSLATION", "更新翻译结果", task_id, 
-                           language=target_language, source=source.value)
+                           language=target_language, source=source.value, text_number=text_number)
             else:
                 # 创建新记录
                 translation_result = TranslationResult(
                     task_id=task_id,
+                    text_number=text_number,
                     target_language=target_language,
                     source_type=source.value,
                     source_text=translation_data["source_text"],
@@ -103,7 +115,7 @@ def save_translation_result(
                 )
                 db.add(translation_result)
                 logger.step("TRANSLATION", "保存翻译结果", task_id, 
-                           language=target_language, source=source.value)
+                           language=target_language, source=source.value, text_number=text_number)
             
             db.commit()
             

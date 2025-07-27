@@ -78,6 +78,55 @@ def test_text_task():
         return None
 
 
+def test_text_file_upload():
+    """测试文本文件上传功能"""
+    print("测试文本文件上传功能...")
+    
+    import tempfile
+    import os
+    
+    # 创建测试文件
+    test_content = "This is a test file for translation. The filename should be used to extract text number."
+    temp_dir = tempfile.gettempdir()
+    test_file_path = os.path.join(temp_dir, "456.txt")
+    
+    try:
+        # 写入测试文件
+        with open(test_file_path, 'w', encoding='utf-8') as f:
+            f.write(test_content)
+        
+        # 上传文件
+        with open(test_file_path, 'rb') as f:
+            files = {
+                'text_file': ('456.txt', f, 'text/plain')
+            }
+            
+            response = requests.post(
+                f"{BASE_URL}/api/v1/tasks/text/upload",
+                files=files
+            )
+        
+        if response.status_code == 200:
+            result = response.json()
+            print(f"✅ 文件上传任务创建成功:")
+            print(f"   任务ID: {result['task_id']}")
+            print(f"   状态: {result['status']}")
+            print(f"   目标语言: {result['languages']}")
+            return result['task_id']
+        else:
+            print(f"❌ 文件上传任务创建失败: {response.status_code}")
+            print(f"   错误信息: {response.text}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ 请求失败: {e}")
+        return None
+    finally:
+        # 清理测试文件
+        if os.path.exists(test_file_path):
+            os.remove(test_file_path)
+
+
 def test_task_status(task_id):
     """测试任务状态查询"""
     if not task_id:
@@ -136,11 +185,15 @@ if __name__ == "__main__":
     test_health_check()
     print()
     
-    # 2. 测试文本任务
+    # 2. 测试文本任务（JSON方式）
     text_task_id = test_text_task()
     print()
     
-    # 3. 测试音频任务（如果有测试文件）
+    # 3. 测试文本文件上传
+    file_task_id = test_text_file_upload()
+    print()
+    
+    # 4. 测试音频任务（如果有测试文件）
     if os.path.exists('test.mp3'):
         audio_task_id = test_audio_task()
         print()

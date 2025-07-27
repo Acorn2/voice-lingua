@@ -129,9 +129,10 @@ def create_task_record(
     task_id: str,
     task_type: str,
     languages: List[str],
-    audio_file: Optional[str] = None,
+    file_path: Optional[str] = None,
     text_content: Optional[str] = None,
     reference_text: Optional[str] = None,
+    text_number: Optional[str] = None,
     db: Session = None
 ) -> Task:
     """创建任务记录"""
@@ -155,9 +156,10 @@ def create_task_record(
             task_type=task_type,
             status=initial_status,
             languages=languages,
-            audio_file_path=audio_file,
+            file_path=file_path,
             text_content=text_content,
             reference_text=reference_text,
+            text_number=text_number,
         )
         
         db.add(task)
@@ -210,6 +212,14 @@ async def create_audio_task(
         # 生成任务ID
         task_id = str(uuid.uuid4())
         
+        # 在文件重命名前提取文本编号
+        from src.utils.text_number_extractor import extract_text_number_from_filename
+        text_number = extract_text_number_from_filename(audio_file.filename)
+        if not text_number:
+            text_number = f"audio_{int(datetime.utcnow().timestamp())}"
+        
+        logger.info(f"从音频文件 {audio_file.filename} 提取文本编号: {text_number}")
+        
         # 保存文件到本地
         audio_path = await save_uploaded_file(audio_file, task_id)
         
@@ -218,8 +228,9 @@ async def create_audio_task(
             task_id=task_id,
             task_type="audio",
             languages=target_languages,
-            audio_file=audio_path,
+            file_path=audio_path,
             reference_text=reference_text,
+            text_number=text_number,
             db=db
         )
         
@@ -248,11 +259,151 @@ async def create_text_task(
     db: Session = Depends(get_db)
 ):
     """
-    创建文本翻译任务
+    创建文本翻译任务（JSON方式）
     
     自动翻译为所有支持的语言：en, zh, zh-tw, ja, ko, fr, de, es, it, ru
     """
     try:
+        # 使用配置中的所有支持语言作为目标语言
+        target_languages = settings.get_supported_languages()
+        logger.info(f"使用配置的目标语言: {target_languages}")
+        
+        task_id = str(uuid.uuid4())
+        
+        # 为直接传入的文本生成一个简单的编号
+        text_number = f"text_{int(datetime.utcnow().timestamp())}"
+        
+        # 创建任务记录
+        task = create_task_record(
+            task_id=task_id,
+            task_type="text",
+            languages=target_languages,
+            text_content=request.text_content,
+            text_number=text_number,
+            db=db
+        )
+        
+        # 异步触发线程池批量翻译任务（高性能多线程优化）
+        from src.tasks.translation_task import batch_translate_threaded_task
+        batch_translate_threaded_task.delay(task_id, request.text_content, target_languages, SourceType.TEXT.value)
+        
+        logger.info(f"文本任务创建成功: {task_id}, 文本编号: {text_number}, 文本长度: {len(request.text_content)}")
+        
+        return TaskResponse(
+            task_id=task_id,
+            status=TaskStatus.TRANSLATION_PENDING,
+            created_at=task.created_at.isoformat(),
+            languages=target_languages
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建文本任务失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"任务创建失败: {str(e)}")
+
+
+@app.post("/api/v1/tasks/text/upload", response_model=TaskResponse)
+async def create_text_task_with_file(
+    text_content: Optional[str] = Form(None, description="直接传入的文本内容"),
+    text_file: Optional[UploadFile] = File(None, description="上传的文本文件 (.txt)"),
+    db: Session = Depends(get_db)
+):
+    """
+    创建文本翻译任务（支持文件上传）
+    
+    支持两种方式：
+    1. 直接传入文本内容 (text_content)
+    2. 上传文本文件 (text_file, 支持 .txt 格式)
+    
+    自动翻译为所有支持的语言：en, zh, zh-tw, ja, ko, fr, de, es, it, ru
+    """
+    """
+    创建文本翻译任务
+    
+    支持两种方式：
+    1. 直接传入文本内容 (text_content)
+    2. 上传文本文件 (text_file, 支持 .txt 格式)
+    
+    自动翻译为所有支持的语言：en, zh, zh-tw, ja, ko, fr, de, es, it, ru
+    """
+    try:
+        # 验证输入参数
+        if not text_content and not text_file:
+            raise HTTPException(
+                status_code=400, 
+                detail="必须提供 text_content 或 text_file 其中之一"
+            )
+        
+        if text_content and text_file:
+            raise HTTPException(
+                status_code=400, 
+                detail="不能同时提供 text_content 和 text_file，请选择其中一种方式"
+            )
+        
+        # 处理文本内容
+        final_text_content = ""
+        text_number = None
+        
+        if text_content:
+            # 直接使用传入的文本内容
+            final_text_content = text_content.strip()
+            if not final_text_content:
+                raise HTTPException(status_code=400, detail="文本内容不能为空")
+            
+            # 为直接传入的文本生成一个简单的编号
+            text_number = f"text_{int(datetime.utcnow().timestamp())}"
+            
+        elif text_file:
+            # 验证文件类型
+            if not text_file.filename.lower().endswith('.txt'):
+                raise HTTPException(
+                    status_code=400, 
+                    detail="只支持 .txt 格式的文本文件"
+                )
+            
+            # 验证文件大小 (限制为 10MB)
+            if text_file.size and text_file.size > 10 * 1024 * 1024:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="文件大小不能超过 10MB"
+                )
+            
+            # 读取文件内容
+            try:
+                content = await text_file.read()
+                # 尝试不同的编码方式
+                for encoding in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
+                    try:
+                        final_text_content = content.decode(encoding).strip()
+                        logger.info(f"成功使用 {encoding} 编码读取文件: {text_file.filename}")
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                else:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="无法解码文件内容，请确保文件是有效的文本文件"
+                    )
+                
+                if not final_text_content:
+                    raise HTTPException(status_code=400, detail="文件内容不能为空")
+                
+                # 从文件名提取文本编号
+                from src.utils.text_number_extractor import extract_text_number_from_filename
+                text_number = extract_text_number_from_filename(text_file.filename)
+                if not text_number:
+                    text_number = f"file_{int(datetime.utcnow().timestamp())}"
+                
+                logger.info(f"从文件 {text_file.filename} 提取文本编号: {text_number}")
+                
+            except Exception as e:
+                logger.error(f"读取文件失败: {str(e)}")
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"读取文件失败: {str(e)}"
+                )
+        
         # 使用配置中的所有支持语言作为目标语言
         target_languages = settings.get_supported_languages()
         logger.info(f"使用配置的目标语言: {target_languages}")
@@ -264,15 +415,16 @@ async def create_text_task(
             task_id=task_id,
             task_type="text",
             languages=target_languages,
-            text_content=request.text_content,
+            text_content=final_text_content,
+            text_number=text_number,
             db=db
         )
         
         # 异步触发线程池批量翻译任务（高性能多线程优化）
         from src.tasks.translation_task import batch_translate_threaded_task
-        batch_translate_threaded_task.delay(task_id, request.text_content, target_languages, SourceType.TEXT.value)
+        batch_translate_threaded_task.delay(task_id, final_text_content, target_languages, SourceType.TEXT.value)
         
-        logger.info(f"文本任务创建成功: {task_id}")
+        logger.info(f"文本任务创建成功: {task_id}, 文本编号: {text_number}, 文本长度: {len(final_text_content)}")
         
         return TaskResponse(
             task_id=task_id,
@@ -357,10 +509,10 @@ async def cancel_task(task_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"取消失败: {str(e)}")
 
 
-@app.get("/api/v1/translations/{language}/{text_id}/{source}", response_model=TranslationResult)
-async def get_translation(
+@app.get("/api/v1/translations/{language}/{text_number}/{source}", response_model=TranslationResult)
+async def get_translation_by_text_number(
     language: str, 
-    text_id: str, 
+    text_number: str, 
     source: str,
     db: Session = Depends(get_db)
 ):
@@ -368,6 +520,15 @@ async def get_translation(
     按语言、文本编号和来源查询翻译结果
     
     这是系统要求的核心查询接口：通过 语言 -> 文本编号 -> 文本来源 快速查询
+    文本编号从上传的文件名中提取（如：1.mp3 -> "1", text_123.txt -> "123"）
+    
+    Args:
+        language: 目标语言 (如: en, zh, ja)
+        text_number: 文本编号 (从文件名提取)
+        source: 来源类型 (AUDIO 或 TEXT)
+    
+    Returns:
+        TranslationResult: 翻译结果
     """
     try:
         # 验证来源类型
@@ -376,21 +537,23 @@ async def get_translation(
         except ValueError:
             raise HTTPException(status_code=400, detail=f"无效的来源类型: {source}")
         
-        # 这里简化实现，实际应该根据 text_id 查询对应的任务
-        # 暂时使用 task_id 作为 text_id 的映射
+        # 直接从 TranslationResult 表查询，使用新增的 text_number 字段
         translation = db.query(DBTranslationResult).filter(
-            DBTranslationResult.task_id == text_id,
+            DBTranslationResult.text_number == text_number,
             DBTranslationResult.target_language == language,
             DBTranslationResult.source_type == source
         ).first()
         
         if not translation:
-            raise HTTPException(status_code=404, detail="翻译结果不存在")
+            raise HTTPException(
+                status_code=404, 
+                detail=f"未找到文本编号 '{text_number}' 在语言 '{language}' 来源 '{source}' 的翻译结果"
+            )
         
         return TranslationResult(
             task_id=str(translation.task_id),
             language=translation.target_language,
-            text_id=text_id,
+            text_id=translation.text_number,
             source=SourceType(translation.source_type),
             content=translation.translated_text,
             accuracy=float(translation.confidence) if translation.confidence else None,
@@ -402,6 +565,69 @@ async def get_translation(
     except Exception as e:
         logger.error(f"查询翻译失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+
+
+@app.post("/api/v1/translations/batch", response_model=List[TranslationResult])
+async def batch_get_translations(
+    queries: List[dict],
+    db: Session = Depends(get_db)
+):
+    """
+    批量查询翻译结果
+    
+    Args:
+        queries: 查询列表，每个查询包含 language, text_number, source
+        
+    Example:
+        [
+            {"language": "en", "text_number": "1", "source": "AUDIO"},
+            {"language": "zh", "text_number": "2", "source": "TEXT"}
+        ]
+    
+    Returns:
+        List[TranslationResult]: 翻译结果列表
+    """
+    try:
+        results = []
+        
+        for query in queries:
+            # 验证查询参数
+            if not all(key in query for key in ["language", "text_number", "source"]):
+                continue
+            
+            language = query["language"]
+            text_number = query["text_number"]
+            source = query["source"]
+            
+            # 验证来源类型
+            try:
+                source_type = SourceType(source)
+            except ValueError:
+                continue
+            
+            # 查询翻译结果
+            translation = db.query(DBTranslationResult).filter(
+                DBTranslationResult.text_number == text_number,
+                DBTranslationResult.target_language == language,
+                DBTranslationResult.source_type == source
+            ).first()
+            
+            if translation:
+                results.append(TranslationResult(
+                    task_id=str(translation.task_id),
+                    language=translation.target_language,
+                    text_id=translation.text_number,
+                    source=SourceType(translation.source_type),
+                    content=translation.translated_text,
+                    accuracy=float(translation.confidence) if translation.confidence else None,
+                    timestamp=translation.created_at.isoformat()
+                ))
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"批量查询翻译失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"批量查询失败: {str(e)}")
 
 
 @app.get("/api/v1/translation/engine/status")
@@ -583,4 +809,5 @@ if __name__ == "__main__":
         port=8000,
         reload=settings.debug,
         log_level=settings.log_level.lower()
-    ) 
+    )
+

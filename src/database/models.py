@@ -20,9 +20,10 @@ class Task(Base):
     task_type = Column(String(20), nullable=False)  # 'audio' 或 'text'
     status = Column(String(30), nullable=False, default='transcription_pending')
     languages = Column(JSON, nullable=False)  # 目标语言列表
-    audio_file_path = Column(Text, nullable=True)
-    text_content = Column(Text, nullable=True)
+    file_path = Column(Text, nullable=True)  # 文件路径，支持音频文件和txt文件
+    text_content = Column(Text, nullable=True)  # 文本内容，音频转录结果或txt文件内容
     reference_text = Column(Text, nullable=True)
+    text_number = Column(String(50), nullable=True)  # 文本编号，从原始文件名提取
     accuracy = Column(DECIMAL(5, 4), nullable=True)  # STT 准确性分数
     error_message = Column(Text, nullable=True)
     result_url = Column(Text, nullable=True)  # 腾讯云COS结果文件路径
@@ -34,7 +35,6 @@ class Task(Base):
     
     # 关联关系
     translation_results = relationship("TranslationResult", back_populates="task", cascade="all, delete-orphan")
-    text_mappings = relationship("TextMapping", back_populates="task", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<Task(task_id='{self.task_id}', type='{self.task_type}', status='{self.status}')>"
@@ -46,9 +46,10 @@ class Task(Base):
             "task_type": self.task_type,
             "status": self.status,
             "languages": self.languages,
-            "audio_file_path": self.audio_file_path,
+            "file_path": self.file_path,
             "text_content": self.text_content,
             "reference_text": self.reference_text,
+            "text_number": self.text_number,
             "accuracy": float(self.accuracy) if self.accuracy else None,
             "error_message": self.error_message,
             "result_url": self.result_url,
@@ -66,6 +67,7 @@ class TranslationResult(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False)
+    text_number = Column(String(50), nullable=True)  # 文本编号，从文件名提取
     target_language = Column(String(10), nullable=False)
     source_type = Column(String(10), nullable=False)  # 'AUDIO' 或 'TEXT'
     source_text = Column(Text, nullable=False)
@@ -89,6 +91,7 @@ class TranslationResult(Base):
         return {
             "id": self.id,
             "task_id": str(self.task_id),
+            "text_number": self.text_number,
             "target_language": self.target_language,
             "source_type": self.source_type,
             "source_text": self.source_text,
@@ -98,31 +101,7 @@ class TranslationResult(Base):
         }
 
 
-class TextMapping(Base):
-    """文本编号映射表 - 支持按文本编号查询"""
-    __tablename__ = "text_mappings"
-    
-    text_id = Column(String(50), primary_key=True)  # 业务文本编号
-    task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False)
-    language = Column(String(10), nullable=False)
-    source_type = Column(String(10), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    
-    # 关联关系
-    task = relationship("Task", back_populates="text_mappings")
-    
-    def __repr__(self):
-        return f"<TextMapping(text_id='{self.text_id}', task_id='{self.task_id}', lang='{self.language}')>"
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
-        return {
-            "text_id": self.text_id,
-            "task_id": str(self.task_id),
-            "language": self.language,
-            "source_type": self.source_type,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-        }
+
 
 
 class TaskLog(Base):

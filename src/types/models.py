@@ -56,9 +56,21 @@ class AudioTaskRequest(BaseModel):
 
 
 class TextTaskRequest(BaseModel):
-    """文本任务创建请求"""
+    """文本任务创建请求（JSON方式）"""
     text_content: str = Field(..., description="待翻译的文本内容", min_length=1)
 
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "text_content": "Hello, this is a test text for translation."
+            }
+        }
+
+
+class TextTaskFormRequest(BaseModel):
+    """文本任务创建请求（表单方式，支持文件上传）"""
+    text_content: Optional[str] = Field(None, description="直接传入的文本内容")
+    
     class Config:
         json_schema_extra = {
             "example": {
