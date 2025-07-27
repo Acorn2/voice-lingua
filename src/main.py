@@ -23,6 +23,7 @@ from src.database.connection import get_db, create_tables, db_manager
 from src.database.models import Task, TranslationResult as DBTranslationResult
 from src.tasks.transcription_task import transcribe_audio_task
 from src.tasks.translation_task import translate_text_task, get_translation_engine_status
+from src.utils.compact_encoder import CompactTranslationEncoder, UltraCompactEncoder
 
 # 配置日志
 logging.basicConfig(
@@ -455,6 +456,112 @@ async def health_check():
 
 
 # 全局异常处理
+@app.get("/api/v1/encoding/demo", summary="编码格式演示")
+async def encoding_demo():
+    """
+    紧凑编码格式演示
+    
+    展示原始格式 vs 各种紧凑编码格式的对比
+    """
+    # 创建演示数据
+    demo_data = {
+        "task_id": "demo-12345678",
+        "task_type": "audio",
+        "status": "completed",
+        "created_at": "2025-07-26T12:02:29.804574",
+        "completed_at": "2025-07-26T12:06:50.169316",
+        "source_language": "en",
+        "target_languages": ["en", "zh", "zh-tw", "ja", "ko", "fr", "de", "es", "it", "ru"],
+        "transcription": {
+            "text": "Hello world! This is a demonstration of our compact encoding system for multilingual translation results.",
+            "accuracy": 0.95,
+            "language": "en"
+        },
+        "translations": {
+            "zh": {
+                "audio_text": {
+                    "text": "你好世界！这是我们多语言翻译结果紧凑编码系统的演示。",
+                    "source_text": "Hello world! This is a demonstration of our compact encoding system for multilingual translation results.",
+                    "confidence": 0.9,
+                    "source_type": "AUDIO",
+                    "created_at": "2025-07-26T12:03:28.910854"
+                }
+            },
+            "ja": {
+                "audio_text": {
+                    "text": "こんにちは世界！これは私たちの多言語翻訳結果のコンパクトエンコーディングシステムのデモンストレーションです。",
+                    "source_text": "Hello world! This is a demonstration of our compact encoding system for multilingual translation results.",
+                    "confidence": 0.95,
+                    "source_type": "AUDIO",
+                    "created_at": "2025-07-26T12:03:33.719359"
+                }
+            }
+        }
+    }
+    
+    # 获取压缩统计
+    stats = CompactTranslationEncoder.get_compression_stats(demo_data)
+    
+    return JSONResponse(content={
+        "demo_title": "VoiceLingua 紧凑编码演示",
+        "original_format": {
+            "description": "传统JSON格式（冗长且重复）",
+            "size": stats["original_size"],
+            "sample": {
+                "translations": {
+                    "zh": {
+                        "audio_text": {
+                            "text": "你好世界！",
+                            "source_text": "Hello world! This is...",  # 每个翻译都重复存储！
+                            "confidence": 0.9,
+                            "source_type": "AUDIO",
+                            "created_at": "2025-07-26T12:03:28.910854"  # 冗余时间戳！
+                        }
+                    }
+                }
+            }
+        },
+        "compact_format": {
+            "description": "紧凑JSON格式（简洁高效）",
+            "size": stats["compact_json_size"],
+            "compression_ratio": stats["compression_ratios"]["compact_json"],
+            "space_saved": stats["size_reduction"]["compact_json"],
+            "sample": {
+                "v": "1.0",
+                "src": "en",
+                "txt": "Hello world! This is...",  # 只存储一次！
+                "langs": [
+                    [1, "你好世界！", 90, 1],  # [语言代码, 翻译, 置信度%, 类型]
+                    [3, "こんにちは世界！", 95, 1]
+                ]
+            }
+        },
+        "binary_format": {
+            "description": "二进制压缩格式（最高压缩比）",
+            "size": stats["binary_size"],
+            "compression_ratio": stats["compression_ratios"]["binary"],
+            "space_saved": stats["size_reduction"]["binary"],
+            "note": "使用MessagePack序列化 + gzip压缩"
+        },
+        "encoding_rules": {
+            "language_codes": {
+                "0": "en", "1": "zh", "2": "zh-tw", "3": "ja", "4": "ko",
+                "5": "fr", "6": "de", "7": "es", "8": "it", "9": "ru"
+            },
+            "confidence": "整数百分比（0-100）",
+            "source_type": "0=text, 1=audio",
+            "advantages": [
+                "消除重复的source_text（节省50-70%空间）",
+                "使用数字语言代码（节省字符数）",
+                "数组格式减少JSON开销",
+                "二进制压缩进一步减小文件大小",
+                "保持完整的数据可恢复性"
+            ]
+        },
+        "performance_comparison": stats
+    })
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """全局异常处理器"""

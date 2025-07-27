@@ -137,6 +137,40 @@ class COSStorageService:
             logger.error(f"上传JSON数据失败: {e}")
             return False
     
+    def upload_binary(self, data: bytes, cos_key: str, content_type: str = 'application/octet-stream') -> bool:
+        """
+        上传二进制数据到COS
+        
+        Args:
+            data: 要上传的二进制数据
+            cos_key: COS对象键
+            content_type: MIME类型
+            
+        Returns:
+            bool: 上传是否成功
+        """
+        try:
+            # 直接上传二进制内容
+            response = self.client.put_object(
+                Bucket=self.bucket_name,
+                Body=data,
+                Key=cos_key,
+                ContentType=content_type
+            )
+            
+            logger.info(f"二进制数据上传成功: {cos_key} ({len(data)} bytes)")
+            return True
+            
+        except CosServiceError as e:
+            logger.error(f"COS服务错误: {e}")
+            return False
+        except CosClientError as e:
+            logger.error(f"COS客户端错误: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"上传二进制数据失败: {e}")
+            return False
+    
     def download_json(self, cos_key: str) -> Optional[Dict[Any, Any]]:
         """
         从COS下载JSON数据

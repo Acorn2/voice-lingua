@@ -87,7 +87,7 @@ install_dependencies() {
     fi
     
     # 检查是否需要安装依赖
-    if ! $PYTHON_CMD -c "import fastapi, celery, transformers, pydantic" >/dev/null 2>&1; then
+    if ! $PYTHON_CMD -c "import fastapi, celery, transformers, pydantic, msgpack" >/dev/null 2>&1; then
         log_info "安装 Python 依赖包..."
         $PYTHON_CMD -m pip install -r requirements.txt
         log_success "依赖包安装完成"

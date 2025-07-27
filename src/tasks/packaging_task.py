@@ -14,6 +14,7 @@ from src.database.models import Task as TaskModel, TranslationResult
 from src.types.models import TaskStatus
 from src.services.storage_service import storage_service
 from src.utils.logger import get_business_logger, setup_business_logging
+from src.utils.compact_encoder import CompactTranslationEncoder, UltraCompactEncoder
 
 # 设置业务日志
 setup_business_logging()
@@ -165,41 +166,67 @@ def package_results_task(self: Task, task_id: str):
                            source_type=source_type,
                            confidence=f"{translation.confidence:.3f}" if translation.confidence else "N/A")
             
-            # === 本地文件保存 ===
-            logger.step("PACKAGING", "保存本地文件", task_id)
+            # === 紧凑JSON编码和保存 ===
+            logger.step("PACKAGING", "开始紧凑JSON编码", task_id)
             local_results_dir = "results"
             os.makedirs(local_results_dir, exist_ok=True)
-            local_file_path = os.path.join(local_results_dir, f"{task_id}.json")
+            
+            # 生成紧凑JSON格式
+            compact_file_path = os.path.join(local_results_dir, f"{task_id}.compact.json")
+            file_size = 0
             
             try:
-                with open(local_file_path, 'w', encoding='utf-8') as f:
-                    json.dump(results, f, ensure_ascii=False, indent=2)
-                file_size = os.path.getsize(local_file_path)
-                logger.step("PACKAGING", "本地文件保存成功", task_id,
-                           file_path=local_file_path,
-                           file_size=f"{file_size}B")
+                # 编码为紧凑JSON格式
+                compact_data = CompactTranslationEncoder.encode_compact_json(results)
+                
+                # 保存紧凑JSON文件
+                with open(compact_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(compact_data, f, ensure_ascii=False)
+                file_size = os.path.getsize(compact_file_path)
+                
+                # 获取压缩统计
+                compression_stats = CompactTranslationEncoder.get_compression_stats(results)
+                
+                logger.step("PACKAGING", "紧凑JSON编码完成", task_id,
+                           original_size=f"{compression_stats['original_size']}B",
+                           compact_size=f"{file_size}B",
+                           compression_ratio=compression_stats["compression_ratios"]["compact_json"],
+                           space_saved=compression_stats["size_reduction"]["compact_json"])
+                
             except Exception as e:
-                logger.step("PACKAGING", "本地文件保存失败", task_id, error=str(e))
-                file_size = 0
+                logger.step("PACKAGING", "紧凑JSON编码失败", task_id, error=str(e))
+                # 回退到原始JSON格式
+                with open(compact_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(results, f, ensure_ascii=False, indent=2)
+                file_size = os.path.getsize(compact_file_path)
+                logger.step("PACKAGING", "回退到原始JSON格式", task_id, size=f"{file_size}B")
             
             # === 云存储上传 ===
-            cos_key = f"results/{datetime.now().strftime('%Y%m%d')}/{task_id}.json"
-            logger.step("PACKAGING", "开始云存储上传", task_id,
-                       cos_key=cos_key)
+            cos_key = f"results/{datetime.now().strftime('%Y%m%d')}/{task_id}.compact.json"
+            logger.step("PACKAGING", "开始云存储上传", task_id, cos_key=cos_key)
             result_url = None
             
             try:
-                if storage_service.upload_json(results, cos_key):
+                # 上传紧凑JSON到云存储
+                with open(compact_file_path, 'r', encoding='utf-8') as f:
+                    compact_data = json.load(f)
+                
+                if storage_service.upload_json(compact_data, cos_key):
                     result_url = storage_service.get_file_url(cos_key, expires=86400)
                     logger.step("PACKAGING", "云存储上传成功", task_id,
                                cos_key=cos_key,
+                               size=f"{file_size}B",
                                expires="24h")
                 else:
                     logger.step("PACKAGING", "云存储上传失败", task_id)
+                    
             except Exception as e:
                 logger.step("PACKAGING", "云存储操作失败", task_id, error=str(e))
-                # 如果云存储失败，使用本地文件路径
-                result_url = f"file://{os.path.abspath(local_file_path)}"
+                result_url = None
+            
+            # 如果云存储失败，使用本地文件路径
+            if not result_url:
+                result_url = f"file://{os.path.abspath(compact_file_path)}"
                 logger.step("PACKAGING", "使用本地文件路径", task_id, 
                            fallback_url=result_url)
             
@@ -209,7 +236,7 @@ def package_results_task(self: Task, task_id: str):
             update_task_status(task_id, TaskStatus.PACKAGING_COMPLETED, {"result_url": result_url})
             
             # === 打包完成 ===
-            logger.packaging_complete(task_id, result_url or local_file_path, file_size,
+            logger.packaging_complete(task_id, result_url or compact_file_path, file_size,
                                     translations_count=translations_count,
                                     languages_count=len(set(t.target_language for t in translations)),
                                     processing_time=f"{total_processing_time:.2f}s")
@@ -218,7 +245,7 @@ def package_results_task(self: Task, task_id: str):
                 "task_id": task_id,
                 "status": "completed",
                 "result_url": result_url,
-                "local_file": local_file_path,
+                "local_file": compact_file_path,
                 "cos_key": cos_key,
                 "translations_count": translations_count,
                 "file_size": file_size,
