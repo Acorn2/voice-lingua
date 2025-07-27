@@ -10,7 +10,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+import requests
+import tempfile
+import json
 from sqlalchemy.orm import Session
 import aiofiles
 
@@ -23,7 +26,7 @@ from src.database.connection import get_db, create_tables, db_manager
 from src.database.models import Task, TranslationResult as DBTranslationResult
 from src.tasks.transcription_task import transcribe_audio_task
 from src.tasks.translation_task import translate_text_task, get_translation_engine_status
-from src.utils.compact_encoder import CompactTranslationEncoder, UltraCompactEncoder
+from src.utils.compact_encoder import decode_translation_data
 
 # 配置日志
 logging.basicConfig(
@@ -786,6 +789,182 @@ async def encoding_demo():
         },
         "performance_comparison": stats
     })
+
+
+@app.get("/api/v1/tasks/{task_id}/download", summary="下载并解码任务结果")
+async def download_and_decode_task_result(task_id: str, db: Session = Depends(get_db)):
+    """
+    下载并解码任务的打包结果文件
+    
+    该接口会：
+    1. 从数据库获取任务信息和result_url
+    2. 从云存储下载压缩的二进制文件
+    3. 解码为可读的JSON格式
+    4. 返回完整的翻译结果
+    
+    Args:
+        task_id: 任务ID
+        
+    Returns:
+        解码后的完整翻译结果JSON
+    """
+    try:
+        # 1. 获取任务信息
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        if not task:
+            raise HTTPException(
+                status_code=404,
+                detail=f"任务不存在: {task_id}"
+            )
+        
+        # 2. 检查任务状态
+        if task.status != TaskStatus.PACKAGING_COMPLETED.value:
+            raise HTTPException(
+                status_code=400,
+                detail=f"任务尚未完成打包，当前状态: {task.status}"
+            )
+        
+        # 3. 检查result_url
+        if not task.result_url:
+            raise HTTPException(
+                status_code=404,
+                detail="任务结果文件不存在"
+            )
+        
+        logger.info(f"开始下载任务 {task_id} 的结果文件: {task.result_url}")
+        
+        # 4. 下载文件
+        binary_data = None
+        
+        if task.result_url.startswith("file://"):
+            # 本地文件
+            local_path = task.result_url.replace("file://", "")
+            try:
+                with open(local_path, 'rb') as f:
+                    binary_data = f.read()
+                logger.info(f"从本地文件读取成功: {local_path}, 大小: {len(binary_data)} bytes")
+            except FileNotFoundError:
+                raise HTTPException(
+                    status_code=404,
+                    detail="本地结果文件不存在"
+                )
+        else:
+            # 云存储文件
+            try:
+                response = requests.get(task.result_url, timeout=30)
+                response.raise_for_status()
+                binary_data = response.content
+                logger.info(f"从云存储下载成功: {len(binary_data)} bytes")
+            except requests.RequestException as e:
+                logger.error(f"下载云存储文件失败: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"下载结果文件失败: {str(e)}"
+                )
+        
+        # 5. 解码数据
+        try:
+            decoded_data = None
+            file_format = "unknown"
+            
+            # 首先尝试二进制解码（紧凑编码格式）
+            try:
+                decoded_data = decode_translation_data(binary_data)
+                file_format = "compact_binary"
+                logger.info(f"紧凑二进制解码成功，任务类型: {decoded_data.get('task_type')}")
+            except Exception as binary_error:
+                logger.warning(f"紧凑二进制解码失败: {binary_error}")
+                
+                # 尝试JSON解码（回退格式）
+                try:
+                    json_str = binary_data.decode('utf-8')
+                    decoded_data = json.loads(json_str)
+                    file_format = "json"
+                    logger.info(f"JSON解码成功，任务类型: {decoded_data.get('task_type')}")
+                except Exception as json_error:
+                    logger.error(f"JSON解码也失败: {json_error}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"文件解码失败 - 紧凑二进制解码错误: {binary_error}, JSON解码错误: {json_error}"
+                    )
+            
+            if not decoded_data:
+                raise HTTPException(
+                    status_code=500,
+                    detail="解码失败：无法识别文件格式"
+                )
+            
+            # 6. 验证解码结果的完整性
+            if not decoded_data.get('translations'):
+                logger.warning(f"解码结果中没有翻译数据，尝试从数据库重建")
+                
+                # 从数据库获取翻译结果重建数据
+                translations = db.query(DBTranslationResult).filter(
+                    DBTranslationResult.task_id == task_id
+                ).all()
+                
+                if translations:
+                    decoded_data['translations'] = {}
+                    for translation in translations:
+                        lang = translation.target_language
+                        source_type = translation.source_type
+                        
+                        if lang not in decoded_data['translations']:
+                            decoded_data['translations'][lang] = {}
+                        
+                        decoded_data['translations'][lang][source_type] = {
+                            "translated_text": translation.translated_text,
+                            "confidence": float(translation.confidence) if translation.confidence else None,
+                            "source_type": source_type,
+                            "target_language": lang
+                        }
+                    
+                    logger.info(f"从数据库重建了 {len(translations)} 条翻译结果")
+            
+            # 7. 补充缺失的任务信息
+            if not decoded_data.get('task_id'):
+                decoded_data['task_id'] = str(task.task_id)
+            if not decoded_data.get('task_type'):
+                decoded_data['task_type'] = task.task_type
+            if not decoded_data.get('accuracy') and task.accuracy:
+                decoded_data['accuracy'] = float(task.accuracy)
+            if not decoded_data.get('text_number'):
+                decoded_data['text_number'] = task.text_number
+            if not decoded_data.get('created_at'):
+                decoded_data['created_at'] = task.created_at.isoformat() if task.created_at else None
+            if not decoded_data.get('completed_at'):
+                decoded_data['completed_at'] = task.completed_at.isoformat() if task.completed_at else None
+            
+            # 8. 添加下载信息元数据
+            decoded_data["download_info"] = {
+                "downloaded_at": datetime.utcnow().isoformat(),
+                "original_size": len(binary_data),
+                "source_url": task.result_url,
+                "file_format": file_format,
+                "encoding_version": decoded_data.get("version", "1.0")
+            }
+            
+            logger.info(f"任务 {task_id} 解码完成，包含 {len(decoded_data.get('translations', {}))} 种语言的翻译结果")
+            
+            return JSONResponse(content=decoded_data)
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"解码失败: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"解码结果文件失败: {str(e)}"
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"下载和解码任务结果失败: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"处理请求失败: {str(e)}"
+        )
 
 
 @app.exception_handler(Exception)

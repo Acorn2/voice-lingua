@@ -14,7 +14,7 @@ from src.database.models import Task as TaskModel, TranslationResult
 from src.types.models import TaskStatus
 from src.services.storage_service import storage_service
 from src.utils.logger import get_business_logger, setup_business_logging
-from src.utils.compact_encoder import CompactTranslationEncoder, UltraCompactEncoder
+from src.utils.compact_encoder import CompactBinaryEncoder, encode_translation_data, decode_translation_data, get_compression_stats
 
 # 设置业务日志
 setup_business_logging()
@@ -150,15 +150,12 @@ def package_results_task(self: Task, task_id: str):
                 if lang not in results["translations"]:
                     results["translations"][lang] = {}
                 
-                # 根据来源类型设置键名
-                key = "audio_text" if source_type == "AUDIO" else "reference_text"
-                
-                results["translations"][lang][key] = {
-                    "text": translation.translated_text,
-                    "source_text": translation.source_text,
+                # 使用编码器期望的结构：直接使用 AUDIO/TEXT 作为键
+                results["translations"][lang][source_type] = {
+                    "translated_text": translation.translated_text,
                     "confidence": float(translation.confidence) if translation.confidence else None,
                     "source_type": source_type,
-                    "created_at": translation.created_at.isoformat()
+                    "target_language": lang
                 }
                 
                 logger.step("PACKAGING", "添加翻译结果", task_id,
@@ -166,52 +163,59 @@ def package_results_task(self: Task, task_id: str):
                            source_type=source_type,
                            confidence=f"{translation.confidence:.3f}" if translation.confidence else "N/A")
             
-            # === 紧凑JSON编码和保存 ===
-            logger.step("PACKAGING", "开始紧凑JSON编码", task_id)
+            # === 超紧凑二进制编码和保存 ===
+            logger.step("PACKAGING", "开始超紧凑二进制编码", task_id)
             local_results_dir = "results"
             os.makedirs(local_results_dir, exist_ok=True)
             
-            # 生成紧凑JSON格式
-            compact_file_path = os.path.join(local_results_dir, f"{task_id}.compact.json")
+            # 生成超紧凑二进制格式
+            binary_file_path = os.path.join(local_results_dir, f"{task_id}.compact.bin")
+            json_file_path = os.path.join(local_results_dir, f"{task_id}.json")  # 备用JSON文件
             file_size = 0
             
             try:
-                # 编码为紧凑JSON格式
-                compact_data = CompactTranslationEncoder.encode_compact_json(results)
+                # 获取压缩统计信息
+                compression_stats = get_compression_stats(results)
                 
-                # 保存紧凑JSON文件
-                with open(compact_file_path, 'w', encoding='utf-8') as f:
-                    json.dump(compact_data, f, ensure_ascii=False)
-                file_size = os.path.getsize(compact_file_path)
+                # 编码为超紧凑二进制格式
+                binary_data = encode_translation_data(results)
                 
-                # 获取压缩统计
-                compression_stats = CompactTranslationEncoder.get_compression_stats(results)
+                # 保存二进制文件
+                with open(binary_file_path, 'wb') as f:
+                    f.write(binary_data)
+                file_size = os.path.getsize(binary_file_path)
                 
-                logger.step("PACKAGING", "紧凑JSON编码完成", task_id,
+                # 同时保存可读的JSON文件用于调试
+                with open(json_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(results, f, ensure_ascii=False, indent=2)
+                
+                logger.step("PACKAGING", "超紧凑二进制编码完成", task_id,
                            original_size=f"{compression_stats['original_size']}B",
-                           compact_size=f"{file_size}B",
-                           compression_ratio=compression_stats["compression_ratios"]["compact_json"],
-                           space_saved=compression_stats["size_reduction"]["compact_json"])
+                           compressed_size=f"{compression_stats['compressed_size']}B",
+                           compression_ratio=compression_stats['compression_ratio'],
+                           space_saved=f"{compression_stats['size_reduction']}B",
+                           encoding_version=compression_stats['encoding_version'])
                 
             except Exception as e:
-                logger.step("PACKAGING", "紧凑JSON编码失败", task_id, error=str(e))
+                logger.step("PACKAGING", "超紧凑二进制编码失败", task_id, error=str(e))
                 # 回退到原始JSON格式
-                with open(compact_file_path, 'w', encoding='utf-8') as f:
+                binary_file_path = json_file_path  # 使用JSON文件作为回退
+                with open(binary_file_path, 'w', encoding='utf-8') as f:
                     json.dump(results, f, ensure_ascii=False, indent=2)
-                file_size = os.path.getsize(compact_file_path)
+                file_size = os.path.getsize(binary_file_path)
                 logger.step("PACKAGING", "回退到原始JSON格式", task_id, size=f"{file_size}B")
             
             # === 云存储上传 ===
-            cos_key = f"results/{datetime.now().strftime('%Y%m%d')}/{task_id}.compact.json"
+            cos_key = f"results/{datetime.now().strftime('%Y%m%d')}/{task_id}.compact.bin"
             logger.step("PACKAGING", "开始云存储上传", task_id, cos_key=cos_key)
             result_url = None
             
             try:
-                # 上传紧凑JSON到云存储
-                with open(compact_file_path, 'r', encoding='utf-8') as f:
-                    compact_data = json.load(f)
+                # 上传二进制文件到云存储
+                with open(binary_file_path, 'rb') as f:
+                    binary_content = f.read()
                 
-                if storage_service.upload_json(compact_data, cos_key):
+                if storage_service.upload_binary(binary_content, cos_key):
                     result_url = storage_service.get_file_url(cos_key, expires=86400)
                     logger.step("PACKAGING", "云存储上传成功", task_id,
                                cos_key=cos_key,
@@ -226,7 +230,7 @@ def package_results_task(self: Task, task_id: str):
             
             # 如果云存储失败，使用本地文件路径
             if not result_url:
-                result_url = f"file://{os.path.abspath(compact_file_path)}"
+                result_url = f"file://{os.path.abspath(binary_file_path)}"
                 logger.step("PACKAGING", "使用本地文件路径", task_id, 
                            fallback_url=result_url)
             
@@ -236,7 +240,7 @@ def package_results_task(self: Task, task_id: str):
             update_task_status(task_id, TaskStatus.PACKAGING_COMPLETED, {"result_url": result_url})
             
             # === 打包完成 ===
-            logger.packaging_complete(task_id, result_url or compact_file_path, file_size,
+            logger.packaging_complete(task_id, result_url or binary_file_path, file_size,
                                     translations_count=translations_count,
                                     languages_count=len(set(t.target_language for t in translations)),
                                     processing_time=f"{total_processing_time:.2f}s")
@@ -245,11 +249,13 @@ def package_results_task(self: Task, task_id: str):
                 "task_id": task_id,
                 "status": "completed",
                 "result_url": result_url,
-                "local_file": compact_file_path,
+                "local_file": binary_file_path,
+                "json_file": json_file_path,  # 调试用的JSON文件
                 "cos_key": cos_key,
                 "translations_count": translations_count,
                 "file_size": file_size,
                 "processing_time": total_processing_time,
+                "compression_stats": compression_stats if 'compression_stats' in locals() else None,
                 "results": results
             }
             

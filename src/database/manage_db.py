@@ -5,8 +5,8 @@
 """
 import sys
 import argparse
-from src.database.connection import create_tables, recreate_tables, db_manager
-from src.config.settings import settings
+from .connection import create_tables, recreate_tables, db_manager
+from ..config.settings import settings
 
 
 def create_db_tables():
@@ -61,7 +61,7 @@ def show_db_info():
     # 检查表是否存在
     try:
         from sqlalchemy import inspect
-        from src.database.connection import engine
+        from .connection import engine
         
         inspector = inspect(engine)
         existing_tables = inspector.get_table_names()

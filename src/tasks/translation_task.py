@@ -929,6 +929,74 @@ def get_all_translations_by_task(task_id: str):
         return []
 
 
+def check_all_translations_completed(task_id: str):
+    """
+    检查任务的所有翻译是否完成，如果完成则触发打包任务
+    """
+    try:
+        with db_manager.get_session() as db:
+            # 获取任务信息
+            task = db.query(Task).filter(Task.task_id == task_id).first()
+            if not task:
+                logger.step("ERROR", "任务不存在", task_id)
+                return
+            
+            # 获取目标语言列表
+            target_languages = task.languages
+            if not target_languages:
+                logger.step("ERROR", "任务没有目标语言", task_id)
+                return
+            
+            # 计算期望的翻译结果数量
+            # 对于音频任务：每种语言有 AUDIO 和 TEXT 两种来源（如果有参考文本）
+            # 对于文本任务：每种语言只有 TEXT 一种来源
+            expected_count = 0
+            if task.task_type == "audio":
+                # 音频任务：AUDIO 来源 + TEXT 来源（如果有参考文本）
+                expected_count = len(target_languages)  # AUDIO 来源
+                if task.reference_text:  # 如果有参考文本，还需要 TEXT 来源
+                    expected_count += len(target_languages)
+            elif task.task_type == "text":
+                # 文本任务：只有 TEXT 来源
+                expected_count = len(target_languages)
+            
+            # 获取当前已完成的翻译结果
+            completed_translations = db.query(TranslationResult).filter(
+                TranslationResult.task_id == task_id
+            ).all()
+            
+            completed_count = len(completed_translations)
+            completed_languages = list(set(t.target_language for t in completed_translations))
+            
+            logger.step("TRANSLATION", "翻译进度统计", task_id,
+                       progress=f"{completed_count}/{expected_count}",
+                       target_languages=target_languages,
+                       completed_languages=completed_languages,
+                       has_reference=bool(task.reference_text))
+            
+            # 检查是否所有翻译都已完成
+            if completed_count >= expected_count:
+                logger.step("TRANSLATION", "所有翻译已完成，触发打包任务", task_id,
+                           completed_translations=completed_count,
+                           expected_translations=expected_count)
+                
+                # 更新任务状态为翻译完成
+                update_task_status(task_id, TaskStatus.TRANSLATION_COMPLETED)
+                
+                # 触发打包任务
+                from src.tasks.packaging_task import package_results_task
+                package_results_task.delay(task_id)
+                
+                logger.step("TRANSLATION", "打包任务已触发", task_id)
+            else:
+                remaining = expected_count - completed_count
+                logger.step("TRANSLATION", "翻译尚未完成", task_id,
+                           remaining=remaining)
+                
+    except Exception as e:
+        logger.step("ERROR", "检查翻译完成状态失败", task_id, error=str(e))
+
+
 def get_translation_engine_status() -> Dict[str, Any]:
     """获取翻译引擎状态（用于健康检查）"""
     try:
